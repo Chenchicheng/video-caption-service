@@ -50,8 +50,16 @@ async def extract_caption(req: ExtractRequest):
             raise HTTPException(status_code=500, detail=f"YouTube 提取失败: {str(e)}")
         return ExtractResponse(**result)
 
+    if platform == "bilibili":
+        from extractors.bilibili import extract
+        try:
+            result = extract(url)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return ExtractResponse(**result)
+
     # 其他平台后续阶段实现
     raise HTTPException(
         status_code=501,
-        detail=f"平台 '{platform}' 尚未支持，当前仅支持 YouTube",
+        detail=f"平台 '{platform}' 尚未支持，当前支持：YouTube、Bilibili",
     )
