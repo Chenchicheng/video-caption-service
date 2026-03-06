@@ -129,16 +129,44 @@ def transcribe_audio_local(audio_path: str, language: str = "zh") -> str:
     return result
 
 
+def trim_audio(input_path: str, output_path: str, max_seconds: int = 300) -> str:
+    """
+    用 ffmpeg 截取音频前 N 秒，转为 16kHz mono wav（Whisper 最优格式）
+    返回处理后的文件路径，失败则返回原路径
+    """
+    import subprocess
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-t", str(max_seconds),
+            "-ar", "16000",  # 16kHz
+            "-ac", "1",       # mono
+            "-f", "wav",
+            output_path,
+        ]
+        subprocess.run(cmd, capture_output=True, check=True)
+        size_mb = os.path.getsize(output_path) / 1024 / 1024
+        print(f"[asr] 音频截取完成（前 {max_seconds}s），大小: {size_mb:.1f} MB")
+        return output_path
+    except Exception as e:
+        print(f"[asr] ffmpeg 截取失败: {e}，使用原文件")
+        return input_path
+
+
 def transcribe_audio(audio_path: str, language: str = "zh") -> str:
     """自动选择转写方式：优先 SiliconFlow，降级本地 Whisper"""
-    try:
-        return transcribe_with_siliconflow(audio_path)
-    except RuntimeError:
-        print("[asr] 未配置 SILICONFLOW_API_KEY，使用本地 Whisper（较慢）")
-        return transcribe_audio_local(audio_path, language)
-    except Exception as e:
-        print(f"[asr] SiliconFlow 失败: {e}，降级本地 Whisper")
-        return transcribe_audio_local(audio_path, language)
+    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
+    if api_key:
+        try:
+            return transcribe_with_siliconflow(audio_path)
+        except Exception as e:
+            print(f"[asr] SiliconFlow 失败: {e}，降级本地 Whisper")
+
+    # 本地 Whisper：先用 ffmpeg 截取前 5 分钟，加快速度
+    trimmed = audio_path + ".trimmed.wav"
+    trimmed = trim_audio(audio_path, trimmed, max_seconds=300)
+    return transcribe_audio_local(trimmed, language)
 
 
 def transcribe_bilibili(bvid: str, cid: int, language: str = "zh") -> str:
