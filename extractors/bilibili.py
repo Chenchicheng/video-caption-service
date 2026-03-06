@@ -103,11 +103,11 @@ def extract(url: str) -> dict:
         print("[bilibili] cid=0，无法获取字幕")
 
     # 没有字幕时，用 Whisper 语音转文字兜底
-    if not transcript:
+    if not transcript and cid:
         print("[bilibili] 开始 Whisper 语音转写...")
         try:
-            from extractors.whisper_transcribe import transcribe_from_url
-            transcript = transcribe_from_url(url, language="zh")
+            from extractors.whisper_transcribe import transcribe_bilibili
+            transcript = transcribe_bilibili(bvid, cid, language="zh")
             print(f"[bilibili] Whisper 转写完成，长度={len(transcript)}")
         except Exception as e:
             print(f"[bilibili] Whisper 转写失败: {e}")
