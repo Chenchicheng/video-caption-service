@@ -4,3 +4,4 @@ youtube-transcript-api==1.0.3
 yt-dlp==2025.1.15
 requests==2.32.3
 python-multipart==0.0.20
+faster-whisper==1.1.1

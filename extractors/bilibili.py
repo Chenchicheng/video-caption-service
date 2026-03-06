@@ -94,6 +94,14 @@ def extract(url: str) -> dict:
         except Exception:
             pass  # 无字幕时静默处理
 
+    # 没有字幕时，用 Whisper 语音转文字兜底
+    if not transcript:
+        try:
+            from extractors.whisper_transcribe import transcribe_from_url
+            transcript = transcribe_from_url(url, language="zh")
+        except Exception as e:
+            print(f"[bilibili] Whisper 转写失败: {e}")
+
     combined_parts = []
     if description:
         combined_parts.append(f"【视频描述】\n{description}")
