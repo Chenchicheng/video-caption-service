@@ -1,6 +1,7 @@
 """
-Whisper 语音转文字
-用于没有字幕的视频，先获取音频流，再用 faster-whisper 转文字
+语音转文字
+优先使用 SiliconFlow 云端 API（快，3-5秒），
+未配置 SILICONFLOW_API_KEY 时降级为本地 faster-whisper（慢，CPU 约 60-120 秒）
 """
 
 import os
@@ -87,13 +88,36 @@ def download_audio_bilibili(bvid: str, cid: int, output_path: str) -> bool:
         return False
 
 
-def transcribe_audio(audio_path: str, language: str = "zh") -> str:
-    """对音频文件进行语音转文字，返回文本"""
+def transcribe_with_siliconflow(audio_path: str) -> str:
+    """使用 SiliconFlow 云端 API 转写（快，3-5秒）"""
+    import time
+    api_key = os.environ.get("SILICONFLOW_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("未配置 SILICONFLOW_API_KEY")
+
+    print("[asr] 使用 SiliconFlow API 转写...")
+    t0 = time.time()
+    with open(audio_path, "rb") as f:
+        resp = requests.post(
+            "https://api.siliconflow.cn/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (os.path.basename(audio_path), f, "audio/mpeg")},
+            data={"model": "FunAudioLLM/SenseVoiceSmall"},
+            timeout=60,
+        )
+    resp.raise_for_status()
+    result = resp.json().get("text", "").strip()
+    print(f"[asr] SiliconFlow 转写完成，字数: {len(result)}，用时: {time.time() - t0:.1f}s")
+    return result
+
+
+def transcribe_audio_local(audio_path: str, language: str = "zh") -> str:
+    """本地 faster-whisper 转写（慢，CPU 约 60-120 秒）"""
     import time
     model = _get_model("tiny")
-    print(f"[whisper] 开始转写，文件: {audio_path}")
+    print(f"[asr] 本地 Whisper 开始转写: {audio_path}")
     t0 = time.time()
-    segments, info = model.transcribe(
+    segments, _ = model.transcribe(
         audio_path,
         language=language,
         beam_size=3,
@@ -101,15 +125,24 @@ def transcribe_audio(audio_path: str, language: str = "zh") -> str:
     )
     texts = [seg.text.strip() for seg in segments if seg.text.strip()]
     result = " ".join(texts)
-    elapsed = time.time() - t0
-    print(f"[whisper] 转写完成，字数: {len(result)}，用时: {elapsed:.1f}s")
+    print(f"[asr] 本地 Whisper 转写完成，字数: {len(result)}，用时: {time.time() - t0:.1f}s")
     return result
 
 
+def transcribe_audio(audio_path: str, language: str = "zh") -> str:
+    """自动选择转写方式：优先 SiliconFlow，降级本地 Whisper"""
+    try:
+        return transcribe_with_siliconflow(audio_path)
+    except RuntimeError:
+        print("[asr] 未配置 SILICONFLOW_API_KEY，使用本地 Whisper（较慢）")
+        return transcribe_audio_local(audio_path, language)
+    except Exception as e:
+        print(f"[asr] SiliconFlow 失败: {e}，降级本地 Whisper")
+        return transcribe_audio_local(audio_path, language)
+
+
 def transcribe_bilibili(bvid: str, cid: int, language: str = "zh") -> str:
-    """
-    专用于 Bilibili 的转写入口：通过官方 API 下载音频 + Whisper 转写
-    """
+    """专用于 Bilibili：官方 API 下载音频 + 转写"""
     import time
     t_total = time.time()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -117,12 +150,12 @@ def transcribe_bilibili(bvid: str, cid: int, language: str = "zh") -> str:
 
         t0 = time.time()
         success = download_audio_bilibili(bvid, cid, audio_file)
-        print(f"[whisper] 下载用时: {time.time() - t0:.1f}s")
+        print(f"[asr] 下载用时: {time.time() - t0:.1f}s")
 
         if not success or not os.path.exists(audio_file):
-            print("[whisper] 音频文件不存在，放弃转写")
+            print("[asr] 音频文件不存在，放弃转写")
             return ""
 
         result = transcribe_audio(audio_file, language=language)
-        print(f"[whisper] 总用时: {time.time() - t_total:.1f}s")
+        print(f"[asr] 总用时: {time.time() - t_total:.1f}s")
         return result
