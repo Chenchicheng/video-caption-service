@@ -15,17 +15,34 @@ HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
-# 模型单例，避免重复加载（tiny 约 70MB，适合 CPU 服务器）
-_model = None
+# SenseVoiceSmall 模型单例
+_sense_model = None
+# Whisper 模型单例（兜底）
+_whisper_model = None
 
 
-def _get_model(model_size: str = "tiny") -> WhisperModel:
-    global _model
-    if _model is None:
-        print(f"[whisper] 加载模型 {model_size}...")
-        _model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        print("[whisper] 模型加载完成")
-    return _model
+def _get_sense_model():
+    global _sense_model
+    if _sense_model is None:
+        from funasr import AutoModel
+        print("[asr] 加载 SenseVoiceSmall 模型（首次需下载 ~234MB）...")
+        _sense_model = AutoModel(
+            model="iic/SenseVoiceSmall",
+            trust_remote_code=True,
+            device="cpu",
+            disable_update=True,
+        )
+        print("[asr] SenseVoiceSmall 加载完成")
+    return _sense_model
+
+
+def _get_whisper_model(model_size: str = "tiny") -> WhisperModel:
+    global _whisper_model
+    if _whisper_model is None:
+        print(f"[asr] 加载 Whisper {model_size} 模型...")
+        _whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        print("[asr] Whisper 模型加载完成")
+    return _whisper_model
 
 
 def download_audio_bilibili(bvid: str, cid: int, output_path: str) -> bool:
@@ -111,10 +128,30 @@ def transcribe_with_siliconflow(audio_path: str) -> str:
     return result
 
 
-def transcribe_audio_local(audio_path: str, language: str = "zh") -> str:
-    """本地 faster-whisper 转写（慢，CPU 约 60-120 秒）"""
+def transcribe_with_sense_voice(audio_path: str) -> str:
+    """使用本地 SenseVoiceSmall 转写（快，中文效果好）"""
     import time
-    model = _get_model("tiny")
+    model = _get_sense_model()
+    print(f"[asr] SenseVoiceSmall 开始转写: {audio_path}")
+    t0 = time.time()
+    res = model.generate(
+        input=audio_path,
+        language="zh",
+        use_itn=True,
+        batch_size_s=300,
+    )
+    text = res[0]["text"] if res else ""
+    # 去掉情绪标签，如 <|HAPPY|><|zh|><|Speech|>
+    import re
+    text = re.sub(r"<\|[^|]+\|>", "", text).strip()
+    print(f"[asr] SenseVoiceSmall 转写完成，字数: {len(text)}，用时: {time.time() - t0:.1f}s")
+    return text
+
+
+def transcribe_audio_local(audio_path: str, language: str = "zh") -> str:
+    """本地 faster-whisper 转写（兜底方案）"""
+    import time
+    model = _get_whisper_model("tiny")
     print(f"[asr] 本地 Whisper 开始转写: {audio_path}")
     t0 = time.time()
     segments, _ = model.transcribe(
@@ -155,17 +192,31 @@ def trim_audio(input_path: str, output_path: str, max_seconds: int = 300) -> str
 
 
 def transcribe_audio(audio_path: str, language: str = "zh") -> str:
-    """自动选择转写方式：优先 SiliconFlow，降级本地 Whisper"""
+    """
+    转写优先级：
+    1. SiliconFlow 云端 API（配置了 SILICONFLOW_API_KEY 时）
+    2. 本地 SenseVoiceSmall（快，中文好）
+    3. 本地 Whisper tiny（兜底）
+    """
+    # 1. 云端 API
     api_key = os.environ.get("SILICONFLOW_API_KEY", "")
     if api_key:
         try:
             return transcribe_with_siliconflow(audio_path)
         except Exception as e:
-            print(f"[asr] SiliconFlow 失败: {e}，降级本地 Whisper")
+            print(f"[asr] SiliconFlow 失败: {e}，降级本地模型")
 
-    # 本地 Whisper：先用 ffmpeg 截取前 5 分钟，加快速度
+    # 先 ffmpeg 截取前 5 分钟 + 转 16kHz wav
     trimmed = audio_path + ".trimmed.wav"
     trimmed = trim_audio(audio_path, trimmed, max_seconds=300)
+
+    # 2. 本地 SenseVoiceSmall
+    try:
+        return transcribe_with_sense_voice(trimmed)
+    except Exception as e:
+        print(f"[asr] SenseVoiceSmall 失败: {e}，降级 Whisper")
+
+    # 3. 兜底 Whisper
     return transcribe_audio_local(trimmed, language)
 
 
