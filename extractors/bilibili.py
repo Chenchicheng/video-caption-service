@@ -86,19 +86,29 @@ def extract(url: str) -> dict:
     description = "\n".join(desc_parts)
 
     transcript = ""
+    print(f"[bilibili] bvid={bvid}, cid={cid}")
+
     if cid:
         try:
             sub_url = _get_subtitle_url(bvid, cid)
+            print(f"[bilibili] subtitle url={sub_url!r}")
             if sub_url:
                 transcript = _fetch_subtitle_text(sub_url)
-        except Exception:
-            pass  # 无字幕时静默处理
+                print(f"[bilibili] subtitle text length={len(transcript)}")
+            else:
+                print("[bilibili] 没有找到字幕，进入 Whisper 流程")
+        except Exception as e:
+            print(f"[bilibili] 获取字幕出错: {e}")
+    else:
+        print("[bilibili] cid=0，无法获取字幕")
 
     # 没有字幕时，用 Whisper 语音转文字兜底
     if not transcript:
+        print("[bilibili] 开始 Whisper 语音转写...")
         try:
             from extractors.whisper_transcribe import transcribe_from_url
             transcript = transcribe_from_url(url, language="zh")
+            print(f"[bilibili] Whisper 转写完成，长度={len(transcript)}")
         except Exception as e:
             print(f"[bilibili] Whisper 转写失败: {e}")
 

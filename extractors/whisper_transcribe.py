@@ -22,8 +22,8 @@ def _get_model(model_size: str = "tiny") -> WhisperModel:
 def download_audio(video_url: str, output_path: str) -> bool:
     """使用 yt-dlp 下载视频音频到 mp3，返回是否成功"""
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,   # 开启详细输出
+        "no_warnings": False,
         "format": "bestaudio/best",
         "outtmpl": output_path,
         "http_headers": {
@@ -33,14 +33,15 @@ def download_audio(video_url: str, output_path: str) -> bool:
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
-            "preferredquality": "64",  # 低码率，减小文件大小
+            "preferredquality": "64",
         }],
-        # 限制最长 10 分钟，避免超大文件
         "match_filter": yt_dlp.utils.match_filter_func("duration < 600"),
     }
     try:
+        print(f"[whisper] 开始下载音频: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
+        print(f"[whisper] 音频下载完成，目标路径: {output_path}.mp3")
         return True
     except Exception as e:
         print(f"[whisper] 音频下载失败: {e}")
@@ -70,7 +71,22 @@ def transcribe_from_url(video_url: str, language: str = "zh") -> str:
         audio_file = audio_base + ".mp3"
 
         success = download_audio(video_url, audio_base)
-        if not success or not os.path.exists(audio_file):
+
+        # yt-dlp 有时会加上额外后缀，列出目录看实际文件名
+        files = os.listdir(tmpdir)
+        print(f"[whisper] tmpdir 文件列表: {files}")
+
+        if not success:
+            print("[whisper] 下载失败，退出")
             return ""
 
+        if not os.path.exists(audio_file):
+            # 尝试找到任意音频文件
+            audio_candidates = [os.path.join(tmpdir, f) for f in files if f.endswith((".mp3", ".m4a", ".webm", ".opus"))]
+            print(f"[whisper] audio.mp3 不存在，候选文件: {audio_candidates}")
+            if not audio_candidates:
+                return ""
+            audio_file = audio_candidates[0]
+
+        print(f"[whisper] 开始 Whisper 转写: {audio_file}")
         return transcribe_audio(audio_file, language=language)
