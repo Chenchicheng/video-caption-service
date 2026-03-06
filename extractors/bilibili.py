@@ -14,6 +14,11 @@ def extract(url: str) -> dict:
         "skip_download": True,
         "writesubtitles": False,
         "extract_flat": False,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
     }
 
     transcript = ""
