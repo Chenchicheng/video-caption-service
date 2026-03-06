@@ -89,8 +89,10 @@ def download_audio_bilibili(bvid: str, cid: int, output_path: str) -> bool:
 
 def transcribe_audio(audio_path: str, language: str = "zh") -> str:
     """对音频文件进行语音转文字，返回文本"""
+    import time
     model = _get_model("tiny")
     print(f"[whisper] 开始转写，文件: {audio_path}")
+    t0 = time.time()
     segments, info = model.transcribe(
         audio_path,
         language=language,
@@ -99,7 +101,8 @@ def transcribe_audio(audio_path: str, language: str = "zh") -> str:
     )
     texts = [seg.text.strip() for seg in segments if seg.text.strip()]
     result = " ".join(texts)
-    print(f"[whisper] 转写完成，字数: {len(result)}")
+    elapsed = time.time() - t0
+    print(f"[whisper] 转写完成，字数: {len(result)}，用时: {elapsed:.1f}s")
     return result
 
 
@@ -107,10 +110,19 @@ def transcribe_bilibili(bvid: str, cid: int, language: str = "zh") -> str:
     """
     专用于 Bilibili 的转写入口：通过官方 API 下载音频 + Whisper 转写
     """
+    import time
+    t_total = time.time()
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_file = os.path.join(tmpdir, "audio.m4s")
+
+        t0 = time.time()
         success = download_audio_bilibili(bvid, cid, audio_file)
+        print(f"[whisper] 下载用时: {time.time() - t0:.1f}s")
+
         if not success or not os.path.exists(audio_file):
             print("[whisper] 音频文件不存在，放弃转写")
             return ""
-        return transcribe_audio(audio_file, language=language)
+
+        result = transcribe_audio(audio_file, language=language)
+        print(f"[whisper] 总用时: {time.time() - t_total:.1f}s")
+        return result
