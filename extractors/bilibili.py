@@ -1,65 +1,98 @@
 """
 Bilibili 视频文案提取
-- description: 视频标题 + 简介（yt-dlp）
-- transcript: 字幕（若有，yt-dlp 提取）
+直接调用 Bilibili 官方 API，无需登录
+- description: 视频标题 + 简介
+- transcript: AI 字幕（若有）
 """
 
-import yt_dlp
+import re
+import requests
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.bilibili.com",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+
+
+def _extract_bvid(url: str) -> str:
+    match = re.search(r"BV[A-Za-z0-9]+", url)
+    if match:
+        return match.group(0)
+    raise ValueError(f"无法从 URL 中提取 BV 号: {url}")
+
+
+def _get_video_info(bvid: str) -> dict:
+    """获取视频基本信息（标题、简介、cid）"""
+    api = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+    resp = requests.get(api, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"Bilibili API 错误: {data.get('message')}")
+    return data["data"]
+
+
+def _get_subtitle_url(bvid: str, cid: int) -> str:
+    """获取字幕下载地址（AI 字幕）"""
+    api = f"https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={cid}"
+    resp = requests.get(api, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        return ""
+    subtitles = data.get("data", {}).get("subtitle", {}).get("subtitles", [])
+    if not subtitles:
+        return ""
+    # 优先中文字幕
+    for sub in subtitles:
+        lang = sub.get("lan", "")
+        if "zh" in lang or "ai" in lang:
+            url = sub.get("subtitle_url", "")
+            if url:
+                return "https:" + url if url.startswith("//") else url
+    # 取第一个
+    url = subtitles[0].get("subtitle_url", "")
+    return "https:" + url if url.startswith("//") else url
+
+
+def _fetch_subtitle_text(url: str) -> str:
+    """下载字幕 JSON 并提取纯文本"""
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    body = data.get("body", [])
+    texts = [item.get("content", "").strip() for item in body if item.get("content")]
+    return " ".join(texts)
 
 
 def extract(url: str) -> dict:
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "writesubtitles": False,
-        "extract_flat": False,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        },
-    }
-
-    transcript = ""
-    description = ""
+    bvid = _extract_bvid(url)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-            title = (info.get("title") or "").strip()
-            desc = (info.get("description") or "").strip()
-
-            # 合并标题和描述作为 description
-            parts = []
-            if title:
-                parts.append(f"标题：{title}")
-            if desc:
-                parts.append(desc)
-            description = "\n".join(parts)
-
-            # 尝试提取字幕
-            subtitles = info.get("subtitles") or {}
-            auto_captions = info.get("automatic_captions") or {}
-            all_subs = {**auto_captions, **subtitles}  # subtitles 优先
-
-            for lang in ["zh-Hans", "zh-Hant", "zh", "en"]:
-                if lang in all_subs:
-                    sub_entries = all_subs[lang]
-                    # 找 json3 或 srv1 格式
-                    for entry in sub_entries:
-                        if entry.get("ext") in ("json3", "srv1", "vtt"):
-                            sub_url = entry.get("url")
-                            if sub_url:
-                                transcript = _fetch_subtitle_text(sub_url)
-                                if transcript:
-                                    break
-                if transcript:
-                    break
-
+        info = _get_video_info(bvid)
     except Exception as e:
-        raise RuntimeError(f"Bilibili 提取失败: {e}")
+        raise RuntimeError(f"获取视频信息失败: {e}")
+
+    title = (info.get("title") or "").strip()
+    desc = (info.get("desc") or "").strip()
+    cid = info.get("cid", 0)
+
+    desc_parts = []
+    if title:
+        desc_parts.append(f"标题：{title}")
+    if desc and desc != "-":
+        desc_parts.append(desc)
+    description = "\n".join(desc_parts)
+
+    transcript = ""
+    if cid:
+        try:
+            sub_url = _get_subtitle_url(bvid, cid)
+            if sub_url:
+                transcript = _fetch_subtitle_text(sub_url)
+        except Exception:
+            pass  # 无字幕时静默处理
 
     combined_parts = []
     if description:
@@ -74,39 +107,3 @@ def extract(url: str) -> dict:
         "combined": combined,
         "platform": "bilibili",
     }
-
-
-def _fetch_subtitle_text(url: str) -> str:
-    """下载字幕文件并提取纯文本"""
-    import requests
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "")
-
-        if "json" in content_type or url.endswith(".json3"):
-            data = resp.json()
-            events = data.get("events", [])
-            texts = []
-            for ev in events:
-                segs = ev.get("segs", [])
-                line = "".join(s.get("utf8", "") for s in segs).strip()
-                if line and line != "\n":
-                    texts.append(line)
-            return " ".join(texts)
-
-        # vtt / srv1 纯文本处理
-        lines = resp.text.splitlines()
-        texts = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("WEBVTT") or "-->" in line:
-                continue
-            if line.isdigit():
-                continue
-            texts.append(line)
-        return " ".join(texts)
-    except Exception:
-        return ""
