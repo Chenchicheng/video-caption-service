@@ -107,7 +107,7 @@ def extract(url: str) -> dict:
         print("[bilibili] 开始 Whisper 语音转写...")
         try:
             from extractors.whisper_transcribe import transcribe_bilibili
-            transcript = transcribe_bilibili(bvid, cid, language="zh")
+            transcript = transcribe_bilibili(bvid, cid)
             print(f"[bilibili] Whisper 转写完成，长度={len(transcript)}")
         except Exception as e:
             print(f"[bilibili] Whisper 转写失败: {e}")
