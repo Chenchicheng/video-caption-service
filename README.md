@@ -1,6 +1,6 @@
 # 视频文案提取服务
 
-从 YouTube（后续支持 Bilibili、抖音、TikTok）提取视频字幕和描述文案，供 AI 分析生成菜谱。
+从 YouTube、Bilibili、小红书（后续支持抖音、TikTok）提取视频字幕和描述文案，供 AI 分析生成菜谱。
 
 ## Ubuntu 服务器部署
 

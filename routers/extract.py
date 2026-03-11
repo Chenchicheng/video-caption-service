@@ -25,6 +25,8 @@ def _detect_platform(url: str) -> str:
         return "youtube"
     if "bilibili.com" in url_lower or "b23.tv" in url_lower:
         return "bilibili"
+    if "xhslink.com" in url_lower or "xiaohongshu.com" in url_lower:
+        return "xiaohongshu"
     if "douyin.com" in url_lower or "iesdouyin.com" in url_lower:
         return "douyin"
     if "tiktok.com" in url_lower:
@@ -58,8 +60,16 @@ async def extract_caption(req: ExtractRequest):
             raise HTTPException(status_code=500, detail=str(e))
         return ExtractResponse(**result)
 
+    if platform == "xiaohongshu":
+        from extractors.xiaohongshu import extract
+        try:
+            result = extract(url)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return ExtractResponse(**result)
+
     # 其他平台后续阶段实现
     raise HTTPException(
         status_code=501,
-        detail=f"平台 '{platform}' 尚未支持，当前支持：YouTube、Bilibili",
+        detail=f"平台 '{platform}' 尚未支持，当前支持：YouTube、Bilibili、小红书",
     )
