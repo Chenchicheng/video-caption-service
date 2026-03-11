@@ -234,23 +234,61 @@ def _transcribe_douyin(video_url: str) -> str:
         return ""
 
 
+def _is_fake_play_url(video_url: str) -> bool:
+    """
+    检测 play 地址是否使用了 aweme_id（纯数字）作为 video_id。
+    真实 video_id 是字母数字混合（如 v0200fg10000...），纯数字的是 aweme_id，无效。
+    """
+    m = re.search(r'video_id=(\w+)', video_url)
+    if m:
+        return m.group(1).isdigit()
+    return False
+
+
 def extract_with_video_url(url: str, video_url: str) -> dict:
     """
-    客户端已提供视频直链，直接转写，仍抓取页面获取 description
+    客户端已提供视频直链，直接转写，仍抓取页面获取 description。
+    若客户端传入的是 aweme_id 构造的伪 play 地址，则从页面获取真实 video_id。
     """
     print(f"[douyin] 使用客户端传入的视频直链: {video_url[:60]}...")
     url = url.strip()
     description = ""
     html = ""
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
-        resp.raise_for_status()
-        html = resp.text
+
+    # 若 play URL 使用纯数字 video_id（即 aweme_id），则尝试从页面拿真实 video_id
+    if _is_fake_play_url(video_url):
+        print(f"[douyin] 检测到伪 play 地址（aweme_id），尝试从页面提取真实 video_id")
+        aweme_id = _extract_video_id(url)
+        if aweme_id:
+            share_url = f"https://www.iesdouyin.com/share/video/{aweme_id}/"
+            for h in (ANDROID_HEADERS, MOBILE_HEADERS, HEADERS):
+                try:
+                    resp = requests.get(share_url, headers=h, timeout=20, allow_redirects=True)
+                    resp.raise_for_status()
+                    html = resp.text
+                    router_desc, router_video = _extract_from_router_data(html)
+                    if router_video:
+                        video_url = router_video
+                        print(f"[douyin] 已修正为真实 play 地址: {video_url[:60]}...")
+                    if router_desc and not description:
+                        description = "【视频描述】\n" + router_desc
+                    if router_video:
+                        break
+                except Exception as e:
+                    print(f"[douyin] 获取真实 video_id 失败: {e}")
+
+    if not html:
+        try:
+            resp = requests.get(url, headers=ANDROID_HEADERS, timeout=20, allow_redirects=True)
+            resp.raise_for_status()
+            html = resp.text
+        except Exception as e:
+            print(f"[douyin] 请求页面失败: {e}")
+
+    if not description:
         meta_parts = _extract_meta_content(html)
         if meta_parts:
             description = "【页面摘要】\n" + "\n".join(meta_parts)
-    except Exception as e:
-        print(f"[douyin] 请求页面失败: {e}")
 
     # 尝试 API 补充 desc
     vid = _extract_video_id(url)
