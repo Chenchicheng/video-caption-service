@@ -13,6 +13,7 @@ import base64
 import subprocess
 import tempfile
 import time
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -150,7 +151,7 @@ def _call_vlm_single(frames: list[str], batch_idx: int = 0) -> str:
             "Content-Type": "application/json",
         },
         json=payload,
-        timeout=120,
+        timeout=40,   # 单批最多等 40s，防止卡死
     )
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"].strip()
@@ -175,12 +176,19 @@ def _call_vlm_parallel(frames: list[str], num_batches: int = _NUM_BATCHES) -> st
     print(f"[vision] 并行发送 {len(batches)} 批（每批 {batch_size} 帧）...")
 
     results: list[str] = [""] * len(batches)
+    # 总超时 = 单批超时(40s) + 少量缓冲，超时后放弃未完成的批次，用已有结果返回
+    total_timeout = 50
     with ThreadPoolExecutor(max_workers=len(batches)) as ex:
         future_to_idx = {
             ex.submit(_call_vlm_single, batch, idx): idx
             for idx, batch in enumerate(batches)
         }
-        for future in as_completed(future_to_idx):
+        done, not_done = concurrent.futures.wait(
+            future_to_idx.keys(), timeout=total_timeout
+        )
+        if not_done:
+            print(f"[vision] {len(not_done)} 个批次超时未返回，使用已完成的 {len(done)} 批结果")
+        for future in done:
             idx = future_to_idx[future]
             try:
                 results[idx] = future.result()
