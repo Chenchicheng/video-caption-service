@@ -120,6 +120,11 @@ XHS_HEADERS = {
     "Referer": "https://www.xiaohongshu.com",
 }
 
+DOUYIN_HEADERS = {
+    **HEADERS,
+    "Referer": "https://www.iesdouyin.com",
+}
+
 # 分片并行下载，CDN 支持 Range 时可显著加速
 _NUM_CONNECTIONS = 4
 
@@ -251,4 +256,53 @@ def transcribe_xiaohongshu(video_url: str) -> str:
 
         result = transcribe_with_siliconflow(audio_file)
         print(f"[asr] 总用时: {time.time() - t_total:.1f}s")
+        return result
+
+
+def transcribe_douyin(video_url: str) -> str:
+    """
+    抖音专用：FFmpeg 直读 URL（referer 抖音）提取音频 -> SiliconFlow 转写
+    """
+    t_total = time.time()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_file = os.path.join(tmpdir, "audio.mp3")
+        asr_args = ["-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "64k"]
+        video_file = os.path.join(tmpdir, "video.mp4")
+        ffmpeg_done = False
+
+        try:
+            print(f"[asr] ffmpeg 直读抖音 URL 提取音频: {video_url[:50]}...")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-referer", "https://www.iesdouyin.com",
+                    "-user_agent", HEADERS["User-Agent"],
+                    "-i", video_url, *asr_args,
+                    "-loglevel", "error", audio_file,
+                ],
+                check=True, capture_output=True, timeout=120,
+            )
+            ffmpeg_done = True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        if not ffmpeg_done:
+            try:
+                resp = requests.get(video_url, headers=DOUYIN_HEADERS, timeout=60, stream=True)
+                resp.raise_for_status()
+                with open(video_file, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        f.write(chunk)
+                subprocess.run(["ffmpeg", "-y", "-i", video_file, *asr_args, "-loglevel", "error", audio_file],
+                              check=True, capture_output=True)
+                ffmpeg_done = True
+            except Exception as e:
+                print(f"[asr] 抖音视频下载/ffmpeg 失败: {e}")
+
+        if not os.path.exists(audio_file) or os.path.getsize(audio_file) < 100:
+            return ""
+
+        result = transcribe_with_siliconflow(audio_file)
+        print(f"[asr] 抖音转写总用时: {time.time() - t_total:.1f}s")
         return result

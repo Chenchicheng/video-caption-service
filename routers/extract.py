@@ -77,8 +77,24 @@ async def extract_caption(req: ExtractRequest):
             raise HTTPException(status_code=500, detail=str(e))
         return ExtractResponse(**result)
 
+    if platform == "douyin" and req.video_url:
+        from extractors.douyin import extract_with_video_url
+        try:
+            result = extract_with_video_url(url, req.video_url.strip())
+            return ExtractResponse(**result)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    if platform == "douyin":
+        from extractors.douyin import extract
+        try:
+            result = extract(url)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return ExtractResponse(**result)
+
     # 其他平台后续阶段实现
     raise HTTPException(
         status_code=501,
-        detail=f"平台 '{platform}' 尚未支持，当前支持：YouTube、Bilibili、小红书",
+        detail=f"平台 '{platform}' 尚未支持，当前支持：YouTube、Bilibili、小红书、抖音",
     )
