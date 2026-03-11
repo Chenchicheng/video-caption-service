@@ -262,8 +262,11 @@ def transcribe_xiaohongshu(video_url: str) -> str:
 def transcribe_douyin(video_url: str) -> str:
     """
     抖音专用：FFmpeg 直读 URL（referer 抖音）提取音频 -> SiliconFlow 转写
+    play 地址（douyin.com/aweme/v1/play）会 302 重定向，referer 需匹配域名
     """
     t_total = time.time()
+    referer = "https://www.douyin.com" if "douyin.com/aweme" in video_url else "https://www.iesdouyin.com"
+    dy_headers = {**HEADERS, "Referer": referer}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_file = os.path.join(tmpdir, "audio.mp3")
@@ -276,7 +279,7 @@ def transcribe_douyin(video_url: str) -> str:
             subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-referer", "https://www.iesdouyin.com",
+                    "-referer", referer,
                     "-user_agent", HEADERS["User-Agent"],
                     "-i", video_url, *asr_args,
                     "-loglevel", "error", audio_file,
@@ -289,7 +292,7 @@ def transcribe_douyin(video_url: str) -> str:
 
         if not ffmpeg_done:
             try:
-                resp = requests.get(video_url, headers=DOUYIN_HEADERS, timeout=60, stream=True)
+                resp = requests.get(video_url, headers=dy_headers, timeout=60, stream=True)
                 resp.raise_for_status()
                 with open(video_file, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=65536):

@@ -310,6 +310,11 @@ def extract(url: str) -> dict:
         if not video_url:
             video_url = _extract_video_url_from_api(item)
 
+    # 3. 兜底：从视频 ID 构造 play 地址（302 重定向到实际 mp4）
+    if not video_url and video_id:
+        video_url = f"https://www.douyin.com/aweme/v1/play/?video_id={video_id}&ratio=720p&line=0"
+        print(f"[douyin] 使用 play 地址兜底: {video_url[:60]}...")
+
     if not description:
         description = "（视频内容）"
     else:
