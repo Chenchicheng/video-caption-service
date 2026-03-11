@@ -68,7 +68,7 @@ def _extract_frames(
     *,
     referer: str = "https://www.xiaohongshu.com",
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    num_frames: int = 8,
+    num_frames: int = 16,
 ) -> list[str]:
     """
     ffmpeg 从视频 URL 均匀抽帧，返回图片路径列表。
@@ -182,7 +182,7 @@ def extract_recipe_from_video_frames(
     video_url: str,
     *,
     referer: str = "https://www.xiaohongshu.com",
-    num_frames: int = 8,
+    num_frames: int = 16,
 ) -> str:
     """
     主入口：从视频 URL 抽帧 → VLM 理解 → 返回菜谱文本
