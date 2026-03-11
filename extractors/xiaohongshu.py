@@ -32,10 +32,16 @@ def _resolve_url(url: str) -> str:
 
 
 def _extract_note_id(html: str, url: str) -> str | None:
-    """从 URL 或 HTML 提取 24 位 noteId"""
-    m = re.search(r"(?:xiaohongshu\.com|xhslink\.com)/explore/([a-f0-9]{24})", url, re.I)
-    if m:
-        return m.group(1)
+    """从 URL 或 HTML 提取 24 位 noteId（支持 explore、discovery/item 等格式）"""
+    patterns = [
+        r"(?:xiaohongshu\.com|xhslink\.com)/explore/([a-f0-9]{24})",
+        r"/discovery/item/([a-f0-9]{24})",
+        r"/explore/([a-f0-9]{24})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, url, re.I)
+        if m:
+            return m.group(1)
     m = re.search(r'"noteId"\s*:\s*"([a-f0-9]{24})"', html)
     if m:
         return m.group(1)
@@ -61,6 +67,29 @@ def _extract_meta_content(html: str) -> list[str]:
     return parts
 
 
+def _extract_video_url(html: str) -> str | None:
+    """从小红书页面提取视频直链（og:video、originVideoKey、xhscdn）"""
+    # og:video
+    for pat in [
+        r'<meta\s+(?:property|name)=["\']og:video["\']\s+content=["\']([^"\']+)["\']',
+        r'<meta\s+content=["\']([^"\']+\.mp4[^"\']*)["\']\s+(?:property|name)=["\']og:video["\']',
+    ]:
+        m = re.search(pat, html, re.I)
+        if m and "xhscdn" in m.group(1) and ".mp4" in m.group(1):
+            return m.group(1).strip()
+    # originVideoKey
+    m = re.search(r'"originVideoKey"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    if m:
+        key = _decode_unicode_escape(m.group(1)).replace("\\/", "/")
+        if len(key) > 5:
+            return f"https://sns-video-bd.xhscdn.com/{key}"
+    # xhscdn 直链
+    m = re.search(r'https://sns-video-(?:hw|bd)\.xhscdn\.com/[^\s"\']+\.mp4[^\s"\']*', html)
+    if m:
+        return m.group(0).split('"')[0].split("'")[0]
+    return None
+
+
 def _extract_inline_json(html: str) -> list[str]:
     """从小红书内嵌 JSON 提取 desc、title、content"""
     found = []
@@ -81,11 +110,14 @@ def _extract_inline_json(html: str) -> list[str]:
 def extract(url: str) -> dict:
     """
     从小红书链接提取文案（页面 meta + 内嵌 JSON）
+    若有视频直链则走 Whisper 音频转写（与 B 站一致）
     """
     url = url.strip()
     final_url = _resolve_url(url)
+    print(f"[xiaohongshu] 请求 URL: {url[:80]}...")
+    print(f"[xiaohongshu] 重定向后: {final_url[:80]}...")
 
-    # xhslink 短链：若拿到的是 xhslink 页，尝试二次请求 xiaohongshu.com 完整页
+    # xhslink 短链 或 discovery/item：尝试二次请求 explore 完整页
     html = ""
     try:
         resp = requests.get(final_url, headers=HEADERS, timeout=20, allow_redirects=True)
@@ -93,14 +125,14 @@ def extract(url: str) -> dict:
         html = resp.text
         final_url = resp.url
 
-        if "xhslink.com" in final_url:
-            note_id = _extract_note_id(html, final_url)
-            if note_id:
-                explore_url = f"https://www.xiaohongshu.com/explore/{note_id}"
-                resp2 = requests.get(explore_url, headers=HEADERS, timeout=20, allow_redirects=True)
-                if resp2.ok:
-                    html = resp2.text
-                    final_url = resp2.url
+        note_id = _extract_note_id(html, final_url)
+        if note_id and ("xhslink.com" in final_url or "/discovery/item/" in final_url):
+            explore_url = f"https://www.xiaohongshu.com/explore/{note_id}"
+            print(f"[xiaohongshu] 二次请求 explore 页: {explore_url}")
+            resp2 = requests.get(explore_url, headers=HEADERS, timeout=20, allow_redirects=True)
+            if resp2.ok:
+                html = resp2.text
+                final_url = resp2.url
     except requests.RequestException as e:
         raise RuntimeError(f"请求小红书页面失败: {e}")
 
@@ -114,7 +146,20 @@ def extract(url: str) -> dict:
         desc_lines.append("【笔记详情】\n" + "\n".join(inline_parts))
 
     description = "\n\n".join(desc_lines).strip()
-    transcript = ""  # 小红书无公开字幕 API
+    transcript = ""
+
+    # 尝试提取视频直链，走 Whisper 音频转写（与 B 站一致）
+    video_url = _extract_video_url(html)
+    if video_url:
+        print(f"[xiaohongshu] 找到视频直链: {video_url[:60]}...")
+        try:
+            from extractors.whisper_transcribe import transcribe_xiaohongshu
+            transcript = transcribe_xiaohongshu(video_url)
+            print(f"[xiaohongshu] Whisper 转写完成，长度={len(transcript)}")
+        except Exception as e:
+            print(f"[xiaohongshu] Whisper 转写失败: {e}")
+    else:
+        print("[xiaohongshu] 未找到视频直链，仅使用页面文案")
 
     combined = description
     if transcript:

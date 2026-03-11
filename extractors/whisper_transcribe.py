@@ -1,9 +1,12 @@
 """
 语音转文字 - 使用 SiliconFlow 云端 API（FunAudioLLM/SenseVoiceSmall）
 需要设置环境变量 SILICONFLOW_API_KEY
+Bilibili: 直接下载音频流
+小红书: 下载 mp4 后用 ffmpeg 提取音频
 """
 
 import os
+import subprocess
 import time
 import tempfile
 import requests
@@ -103,6 +106,55 @@ def transcribe_bilibili(bvid: str, cid: int) -> str:
         success = download_audio_bilibili(bvid, cid, audio_file)
         if not success or not os.path.exists(audio_file):
             print("[asr] 音频文件不存在，放弃转写")
+            return ""
+
+        result = transcribe_with_siliconflow(audio_file)
+        print(f"[asr] 总用时: {time.time() - t_total:.1f}s")
+        return result
+
+
+def download_video_xiaohongshu(video_url: str, output_path: str) -> bool:
+    """下载小红书视频（xhscdn mp4）"""
+    xhs_headers = {
+        **HEADERS,
+        "Referer": "https://www.xiaohongshu.com",
+    }
+    try:
+        print(f"[asr] 下载小红书视频: {video_url[:60]}...")
+        t0 = time.time()
+        resp = requests.get(video_url, headers=xhs_headers, timeout=60, stream=True)
+        resp.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        size_mb = os.path.getsize(output_path) / 1024 / 1024
+        print(f"[asr] 视频下载完成，大小: {size_mb:.1f} MB，用时: {time.time() - t0:.1f}s")
+        return True
+    except Exception as e:
+        print(f"[asr] 视频下载失败: {e}")
+        return False
+
+
+def transcribe_xiaohongshu(video_url: str) -> str:
+    """小红书专用：下载视频 -> ffmpeg 提取音频 -> SiliconFlow 转写"""
+    t_total = time.time()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_file = os.path.join(tmpdir, "video.mp4")
+        audio_file = os.path.join(tmpdir, "audio.mp3")
+
+        if not download_video_xiaohongshu(video_url, video_file):
+            return ""
+
+        # ffmpeg 提取音频为 mp3
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", video_file, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_file],
+                check=True,
+                capture_output=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"[asr] ffmpeg 提取音频失败: {e}")
             return ""
 
         result = transcribe_with_siliconflow(audio_file)
