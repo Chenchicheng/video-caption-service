@@ -9,6 +9,8 @@ import os
 import subprocess
 import time
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
 
 HEADERS = {
@@ -113,19 +115,72 @@ def transcribe_bilibili(bvid: str, cid: int) -> str:
         return result
 
 
-def download_video_xiaohongshu(video_url: str, output_path: str) -> bool:
-    """下载小红书视频（xhscdn mp4，兜底用）"""
-    xhs_headers = {
-        **HEADERS,
-        "Referer": "https://www.xiaohongshu.com",
-    }
+XHS_HEADERS = {
+    **HEADERS,
+    "Referer": "https://www.xiaohongshu.com",
+}
+
+# 分片并行下载，CDN 支持 Range 时可显著加速
+_NUM_CONNECTIONS = 4
+
+
+def _download_range(url: str, start: int, end: int, out_path: str, lock) -> None:
+    """下载指定 byte range 写入文件"""
+    h = {**XHS_HEADERS, "Range": f"bytes={start}-{end}"}
+    resp = requests.get(url, headers=h, timeout=60)
+    resp.raise_for_status()
+    data = resp.content
+    with lock:
+        with open(out_path, "r+b") as f:
+            f.seek(start)
+            f.write(data)
+
+
+def download_video_xiaohongshu_parallel(video_url: str, output_path: str) -> bool:
+    """多连接并行下载（需 CDN 支持 Range）"""
     try:
-        print(f"[asr] 下载小红书视频: {video_url[:60]}...")
+        print(f"[asr] 分片并行下载视频 (x{_NUM_CONNECTIONS}): {video_url[:50]}...")
         t0 = time.time()
-        resp = requests.get(video_url, headers=xhs_headers, timeout=60, stream=True)
+        head = requests.head(video_url, headers=XHS_HEADERS, timeout=15, allow_redirects=True)
+        head.raise_for_status()
+        total = int(head.headers.get("Content-Length", 0))
+        accepts_range = head.headers.get("Accept-Ranges", "").lower() == "bytes"
+
+        if not accepts_range or total < 1024 * 1024:  # < 1MB 不折腾
+            return False
+
+        import threading
+        lock = threading.Lock()
+        with open(output_path, "wb") as f:
+            f.truncate(total)
+
+        # 均分 4 段
+        step = (total + _NUM_CONNECTIONS - 1) // _NUM_CONNECTIONS
+        ranges = [(i * step, min((i + 1) * step, total) - 1) for i in range(_NUM_CONNECTIONS)]
+        ranges = [(s, e) for s, e in ranges if s <= e]
+
+        with ThreadPoolExecutor(max_workers=_NUM_CONNECTIONS) as ex:
+            futures = [ex.submit(_download_range, video_url, s, e, output_path, lock) for s, e in ranges]
+            for f in as_completed(futures):
+                f.result()
+
+        size_mb = total / 1024 / 1024
+        print(f"[asr] 视频下载完成，大小: {size_mb:.1f} MB，用时: {time.time() - t0:.1f}s")
+        return True
+    except Exception as e:
+        print(f"[asr] 并行下载失败: {e}")
+        return False
+
+
+def download_video_xiaohongshu(video_url: str, output_path: str) -> bool:
+    """下载小红书视频（单连接兜底）"""
+    try:
+        print(f"[asr] 单连接下载视频: {video_url[:60]}...")
+        t0 = time.time()
+        resp = requests.get(video_url, headers=XHS_HEADERS, timeout=60, stream=True)
         resp.raise_for_status()
         with open(output_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):  # 64KB 减少 syscall
+            for chunk in resp.iter_content(chunk_size=65536):
                 f.write(chunk)
         size_mb = os.path.getsize(output_path) / 1024 / 1024
         print(f"[asr] 视频下载完成，大小: {size_mb:.1f} MB，用时: {time.time() - t0:.1f}s")
@@ -147,38 +202,43 @@ def transcribe_xiaohongshu(video_url: str) -> str:
 
         # ASR 优化：16kHz 单声道 64kbps，语音转写足够，体积小上传快
         asr_args = ["-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "64k"]
+        video_file = os.path.join(tmpdir, "video.mp4")
+        ffmpeg_done = False
 
-        # 方案 1：ffmpeg 直读 URL（不落盘视频，省 I/O）
-        try:
-            print(f"[asr] 使用 ffmpeg 直读 URL 提取音频: {video_url[:50]}...")
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-referer", "https://www.xiaohongshu.com",
-                    "-user_agent", HEADERS["User-Agent"],
-                    "-i", video_url,
-                    *asr_args,
-                    "-loglevel", "error",
-                    audio_file,
-                ],
-                check=True,
-                capture_output=True,
-                timeout=120,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-            print(f"[asr] ffmpeg 直读失败，回退到下载+提取: {e}")
+        # 方案 1：分片并行下载（CDN 支持 Range 时 2-4x 加速）
+        if download_video_xiaohongshu_parallel(video_url, video_file):
+            try:
+                subprocess.run(["ffmpeg", "-y", "-i", video_file, *asr_args, "-loglevel", "error", audio_file],
+                              check=True, capture_output=True)
+                ffmpeg_done = True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
 
-            # 方案 2：先下载视频再提取
-            video_file = os.path.join(tmpdir, "video.mp4")
+        # 方案 2：ffmpeg 直读 URL
+        if not ffmpeg_done:
+            try:
+                print(f"[asr] ffmpeg 直读 URL 提取音频: {video_url[:50]}...")
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-referer", "https://www.xiaohongshu.com",
+                        "-user_agent", HEADERS["User-Agent"],
+                        "-i", video_url, *asr_args,
+                        "-loglevel", "error", audio_file,
+                    ],
+                    check=True, capture_output=True, timeout=120,
+                )
+                ffmpeg_done = True
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+
+        # 方案 3：单连接下载 + ffmpeg
+        if not ffmpeg_done:
             if not download_video_xiaohongshu(video_url, video_file):
                 return ""
             try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", video_file, *asr_args, audio_file],
-                    check=True,
-                    capture_output=True,
-                )
+                subprocess.run(["ffmpeg", "-y", "-i", video_file, *asr_args, audio_file],
+                              check=True, capture_output=True)
             except (subprocess.CalledProcessError, FileNotFoundError) as e2:
                 print(f"[asr] ffmpeg 提取音频失败: {e2}")
                 return ""
