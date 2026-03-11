@@ -262,11 +262,21 @@ def transcribe_xiaohongshu(video_url: str) -> str:
 def transcribe_douyin(video_url: str) -> str:
     """
     抖音专用：FFmpeg 直读 URL（referer 抖音）提取音频 -> SiliconFlow 转写
-    play 地址（douyin.com/aweme/v1/play）会 302 重定向，referer 需匹配域名
+    play 地址（douyin.com/aweme/v1/play）会 302 重定向，先解析出直链可提高成功率
     """
     t_total = time.time()
     referer = "https://www.douyin.com" if "douyin.com/aweme" in video_url else "https://www.iesdouyin.com"
     dy_headers = {**HEADERS, "Referer": referer}
+
+    # play 地址：先 HEAD 解析 302，若得到 .mp4 直链则用直链（ffmpeg 更稳）
+    if "aweme/v1/play" in video_url:
+        try:
+            r = requests.head(video_url, headers=dy_headers, timeout=15, allow_redirects=True)
+            if r.url != video_url and ".mp4" in r.url:
+                video_url = r.url
+                print(f"[asr] play 重定向到直链: {video_url[:60]}...")
+        except Exception:
+            pass
 
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_file = os.path.join(tmpdir, "audio.mp3")
@@ -292,11 +302,17 @@ def transcribe_douyin(video_url: str) -> str:
 
         if not ffmpeg_done:
             try:
-                resp = requests.get(video_url, headers=dy_headers, timeout=60, stream=True)
+                resp = requests.get(video_url, headers=dy_headers, timeout=60, stream=True, allow_redirects=True)
                 resp.raise_for_status()
                 with open(video_file, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=65536):
                         f.write(chunk)
+                # 校验：若下载到的是 HTML/JSON 错误页，跳过
+                if os.path.getsize(video_file) < 1024:
+                    head = open(video_file, "rb").read(128).decode("utf-8", errors="ignore")
+                    if head.lstrip().startswith(("<", "<!", "{")):
+                        print("[asr] 下载内容疑似 HTML/JSON，非视频文件")
+                        raise ValueError("非视频响应")
                 subprocess.run(["ffmpeg", "-y", "-i", video_file, *asr_args, "-loglevel", "error", audio_file],
                               check=True, capture_output=True)
                 ffmpeg_done = True

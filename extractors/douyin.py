@@ -245,9 +245,10 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
         if not (len(description) >= 300 and desc_has_recipe):
             try:
                 from extractors.vision_extract import extract_recipe_from_video_frames
+                ref = "https://www.douyin.com" if "/aweme/v1/play" in video_url else "https://www.iesdouyin.com"
                 vision_text = extract_recipe_from_video_frames(
                     video_url,
-                    referer="https://www.iesdouyin.com"
+                    referer=ref
                 )
                 if vision_text:
                     print(f"[douyin] VLM 分析完成，长度={len(vision_text)}")
@@ -344,9 +345,10 @@ def extract(url: str) -> dict:
             if not (len(description) >= 300 and desc_has_recipe):
                 try:
                     from extractors.vision_extract import extract_recipe_from_video_frames
+                    ref = "https://www.douyin.com" if "/aweme/v1/play" in video_url else "https://www.iesdouyin.com"
                     vision_text = extract_recipe_from_video_frames(
                         video_url,
-                        referer="https://www.iesdouyin.com"
+                        referer=ref
                     )
                     if vision_text:
                         transcript = transcript + "\n\n" + vision_text if transcript else vision_text
