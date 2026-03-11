@@ -18,7 +18,15 @@ HEADERS = {
     "Referer": "https://www.iesdouyin.com/",
 }
 
-# 移动端 UA，部分接口/页面需要
+# 安卓移动端 UA（能拿到 window._ROUTER_DATA，包含真实 video_id）
+ANDROID_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 8.0.0; SM-G955U Build/R16NW) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://www.douyin.com/?is_from_mobile_home=1&recommend=1",
+}
+
+# iOS 移动端 UA
 MOBILE_HEADERS = {
     **HEADERS,
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
@@ -103,6 +111,43 @@ def _extract_video_url_from_api(item: dict) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _extract_from_router_data(html: str) -> tuple[str, str | None]:
+    """
+    从 window._ROUTER_DATA 提取 desc 和真实 video_id（uri 字段），
+    构造 play 地址。返回 (desc, video_url)
+    """
+    m = re.search(r'window\._ROUTER_DATA\s*=\s*(\{.*?\})(?:;|</script>)', html, re.S)
+    if not m:
+        return "", None
+    try:
+        data = json.loads(m.group(1))
+        # 路径: loaderData -> video_(id)/page -> videoInfoRes -> item_list[0]
+        loader = data.get("loaderData") or {}
+        page = loader.get("video_(id)/page") or {}
+        info = page.get("videoInfoRes") or {}
+        items = info.get("item_list") or []
+        if not items:
+            return "", None
+        item = items[0]
+        desc = str(item.get("desc") or "").strip()
+        # 真正的 video_id 在 play_addr.uri
+        uri = ""
+        try:
+            uri = item["video"]["play_addr"]["uri"]
+        except (KeyError, TypeError):
+            pass
+        video_url = None
+        if uri and "mp3" not in uri:
+            video_url = f"https://www.douyin.com/aweme/v1/play/?video_id={uri}"
+            print(f"[douyin] _ROUTER_DATA 提取 uri={uri[:20]}...")
+        elif uri:
+            video_url = uri
+        return desc, video_url
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        print(f"[douyin] _ROUTER_DATA 解析失败: {e}")
+    return "", None
 
 
 def _extract_from_render_data(html: str) -> tuple[list[str], str | None]:
@@ -283,25 +328,51 @@ def extract(url: str) -> dict:
     video_url = None
     html = ""
 
-    # 1. 抓取页面获取 meta + RENDER_DATA
-    for h in (HEADERS, MOBILE_HEADERS):
+    # 1. 优先用安卓 UA 抓取 iesdouyin 分享页，提取 window._ROUTER_DATA（含真实 video_id）
+    share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+    for h in (ANDROID_HEADERS, MOBILE_HEADERS, HEADERS):
         try:
-            resp = requests.get(url, headers=h, timeout=20, allow_redirects=True)
+            resp = requests.get(share_url, headers=h, timeout=20, allow_redirects=True)
             resp.raise_for_status()
             html = resp.text
-            meta_parts = _extract_meta_content(html)
-            render_desc, render_video = _extract_from_render_data(html)
-            if meta_parts:
-                description = "【页面摘要】\n" + "\n".join(meta_parts)
-            if render_desc and all(d not in description for d in render_desc):
-                description = (description + "\n\n【视频描述】\n" + "\n".join(render_desc)).strip()
-            video_url = _extract_video_url_from_html(html)
-            if description or video_url:
+            router_desc, router_video = _extract_from_router_data(html)
+            if router_video:
+                video_url = router_video
+                print(f"[douyin] 从 _ROUTER_DATA 提取到 play 地址")
+            if router_desc:
+                description = "【视频描述】\n" + router_desc
+            if video_url or description:
                 break
         except Exception as e:
-            print(f"[douyin] 页面请求失败: {e}")
+            print(f"[douyin] 分享页请求失败 ({type(h['User-Agent']).__name__}): {e}")
 
-    # 2. API 获取 desc 和视频直链（API 常被限流，仅作补充）
+    # 2. 原始 URL 抓取（若分享页未成功）
+    if not video_url:
+        for h in (ANDROID_HEADERS, MOBILE_HEADERS, HEADERS):
+            try:
+                resp = requests.get(url, headers=h, timeout=20, allow_redirects=True)
+                resp.raise_for_status()
+                html_orig = resp.text
+                meta_parts = _extract_meta_content(html_orig)
+                if meta_parts and not description:
+                    description = "【页面摘要】\n" + "\n".join(meta_parts)
+                render_desc, render_video = _extract_from_render_data(html_orig)
+                if render_desc and all(d not in description for d in render_desc):
+                    description = (description + "\n\n【视频描述】\n" + "\n".join(render_desc)).strip()
+                if not video_url:
+                    video_url = render_video or _extract_video_url_from_html(html_orig)
+                if video_url:
+                    break
+            except Exception as e:
+                print(f"[douyin] 原始 URL 请求失败: {e}")
+
+    # 3. meta 兜底（从 html 拿描述）
+    if not description and html:
+        meta_parts = _extract_meta_content(html)
+        if meta_parts:
+            description = "【页面摘要】\n" + "\n".join(meta_parts)
+
+    # 4. API 补充（desc 优先级低，视频直链备用）
     item = _fetch_item_info(video_id)
     if item:
         if item.get("desc"):
@@ -310,11 +381,6 @@ def extract(url: str) -> dict:
                 description = (description + "\n\n【视频描述】\n" + desc_text).strip()
         if not video_url:
             video_url = _extract_video_url_from_api(item)
-
-    # 3. 兜底：从视频 ID 构造 play 地址（302 重定向到实际 mp4）
-    if not video_url and video_id:
-        video_url = f"https://www.douyin.com/aweme/v1/play/?video_id={video_id}&ratio=720p&line=0"
-        print(f"[douyin] 使用 play 地址兜底: {video_url[:60]}...")
 
     if not description:
         description = "（视频内容）"
