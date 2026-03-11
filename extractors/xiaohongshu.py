@@ -192,19 +192,27 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
     if not asr_is_recipe:
         transcript = ""
 
-    # ASR 无效 且 页面文案不足时：VLM 视频帧理解（不受背景音乐影响）
+    # ASR 无效时：判断页面文案是否足够提取菜谱
+    # og:meta 描述通常只有标题+简介（100字左右），远不足以提取完整菜谱
+    # 只有 description 超过 300 字 且 含菜谱关键词时，才认为可以跳过 VLM
     vision_text = ""
-    if len(transcript) < 30 and len(description) < 80:
-        print(f"[xiaohongshu] ASR/文案不足，尝试 VLM 视频帧分析...")
-        try:
-            from extractors.vision_extract import extract_recipe_from_video_frames
-            vision_text = extract_recipe_from_video_frames(video_url)
-            if vision_text:
-                print(f"[xiaohongshu] VLM 分析完成，长度={len(vision_text)}")
-        except Exception as e:
-            print(f"[xiaohongshu] VLM 分析失败: {e}")
-    elif len(transcript) < 30 and len(description) >= 80:
-        print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 VLM")
+    if len(transcript) < 30:
+        desc_has_recipe = any(
+            kw in description
+            for kw in ("食材", "步骤", "做法", "克", "适量", "翻炒", "调料", "配料", "焯水")
+        )
+        desc_sufficient = len(description) >= 300 and desc_has_recipe
+        if desc_sufficient:
+            print(f"[xiaohongshu] 页面文案含菜谱内容({len(description)}字)，跳过 VLM")
+        else:
+            print(f"[xiaohongshu] ASR 无效且文案不足({len(description)}字，含菜谱词={desc_has_recipe})，启动 VLM 视频帧分析...")
+            try:
+                from extractors.vision_extract import extract_recipe_from_video_frames
+                vision_text = extract_recipe_from_video_frames(video_url)
+                if vision_text:
+                    print(f"[xiaohongshu] VLM 分析完成，长度={len(vision_text)}")
+            except Exception as e:
+                print(f"[xiaohongshu] VLM 分析失败: {e}")
 
     combined_parts = [f"【视频描述】\n{description}"] if description else []
     if transcript:
@@ -304,19 +312,27 @@ def extract(url: str) -> dict:
         if not asr_is_recipe:
             transcript = ""
 
-        # ASR 无效 且 页面文案不足时：VLM 视频帧理解（完全不受背景音乐影响）
-        if len(transcript) < 30 and len(description) < 80:
-            print(f"[xiaohongshu] ASR/文案不足，尝试 VLM 视频帧分析...")
-            try:
-                from extractors.vision_extract import extract_recipe_from_video_frames
-                vision_text = extract_recipe_from_video_frames(video_url)
-                if vision_text:
-                    transcript = vision_text if not transcript else f"{transcript}\n\n{vision_text}"
-                    print(f"[xiaohongshu] VLM 分析完成，长度={len(vision_text)}")
-            except Exception as e:
-                print(f"[xiaohongshu] VLM 分析失败: {e}")
-        elif len(transcript) < 30 and len(description) >= 80:
-            print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 VLM")
+        # ASR 无效时：判断页面文案是否足够提取菜谱
+        # og:meta 描述通常只有标题+简介（100字左右），远不足以提取完整菜谱
+        # 只有 description 超过 300 字 且 含菜谱关键词时，才认为可以跳过 VLM
+        if len(transcript) < 30:
+            desc_has_recipe = any(
+                kw in description
+                for kw in ("食材", "步骤", "做法", "克", "适量", "翻炒", "调料", "配料", "焯水")
+            )
+            desc_sufficient = len(description) >= 300 and desc_has_recipe
+            if desc_sufficient:
+                print(f"[xiaohongshu] 页面文案含菜谱内容({len(description)}字)，跳过 VLM")
+            else:
+                print(f"[xiaohongshu] ASR 无效且文案不足({len(description)}字，含菜谱词={desc_has_recipe})，启动 VLM 视频帧分析...")
+                try:
+                    from extractors.vision_extract import extract_recipe_from_video_frames
+                    vision_text = extract_recipe_from_video_frames(video_url)
+                    if vision_text:
+                        transcript = vision_text if not transcript else f"{transcript}\n\n{vision_text}"
+                        print(f"[xiaohongshu] VLM 分析完成，长度={len(vision_text)}")
+                except Exception as e:
+                    print(f"[xiaohongshu] VLM 分析失败: {e}")
     else:
         print("[xiaohongshu] 未找到视频直链，仅使用页面文案")
 
