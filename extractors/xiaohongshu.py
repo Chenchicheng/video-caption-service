@@ -179,8 +179,9 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
     except Exception as e:
         print(f"[xiaohongshu] Whisper 转写失败: {e}")
 
-    # 无语音/纯文案视频：OCR 画面文字
-    if len(transcript) < 30:
+    # 无语音/纯文案视频：OCR 画面文字（需联网下载模型，可能较慢）
+    # 若页面 description 已足够丰富（如菜谱笔记正文），则跳过 OCR 避免首次下载卡住
+    if len(transcript) < 30 and len(description) < 80:
         try:
             from extractors.ocr_video import extract_text_from_video
             ocr_text = extract_text_from_video(video_url)
@@ -188,7 +189,9 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
                 transcript = ocr_text if not transcript else f"{transcript}\n\n{ocr_text}"
                 print(f"[xiaohongshu] OCR 画面文字完成，长度={len(ocr_text)}")
         except Exception as e:
-            print(f"[xiaohongshu] OCR 失败: {e}")
+            print(f"[xiaohongshu] OCR 失败（可忽略，页面文案已够用）: {e}")
+    elif len(transcript) < 30 and len(description) >= 80:
+        print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 OCR")
 
     combined = description
     try:
@@ -278,8 +281,9 @@ def extract(url: str) -> dict:
             print(f"[xiaohongshu] Whisper 转写完成，长度={len(transcript)}")
         except Exception as e:
             print(f"[xiaohongshu] Whisper 转写失败: {e}")
-        # 无语音/纯文案视频：OCR 画面文字
-        if len(transcript) < 30:
+        # 无语音/纯文案视频：OCR 画面文字（需联网下载模型，可能较慢）
+        # 若页面 description 已足够丰富，则跳过 OCR 避免首次下载卡住
+        if len(transcript) < 30 and len(description) < 80:
             try:
                 from extractors.ocr_video import extract_text_from_video
                 ocr_text = extract_text_from_video(video_url)
@@ -287,7 +291,9 @@ def extract(url: str) -> dict:
                     transcript = ocr_text if not transcript else f"{transcript}\n\n{ocr_text}"
                     print(f"[xiaohongshu] OCR 画面文字完成，长度={len(ocr_text)}")
             except Exception as e:
-                print(f"[xiaohongshu] OCR 失败: {e}")
+                print(f"[xiaohongshu] OCR 失败（可忽略，页面文案已够用）: {e}")
+        elif len(transcript) < 30 and len(description) >= 80:
+            print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 OCR")
     else:
         print("[xiaohongshu] 未找到视频直链，仅使用页面文案")
 
