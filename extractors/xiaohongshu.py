@@ -140,6 +140,57 @@ def _extract_inline_json(html: str) -> list[str]:
     return found
 
 
+def extract_with_video_url(url: str, video_url: str) -> dict:
+    """
+    客户端已提供视频直链，直接走 Whisper，仍抓取页面获取 description
+    """
+    print(f"[xiaohongshu] 使用客户端传入的视频直链: {video_url[:60]}...")
+    url = url.strip()
+    final_url = _resolve_url(url)
+    html = ""
+    try:
+        resp = requests.get(final_url, headers=HEADERS, timeout=20, allow_redirects=True)
+        resp.raise_for_status()
+        html = resp.text
+        final_url = resp.url
+        note_id = _extract_note_id(html, final_url)
+        if note_id and ("xhslink.com" in final_url or "/discovery/item/" in final_url):
+            explore_url = f"https://www.xiaohongshu.com/explore/{note_id}"
+            resp2 = requests.get(explore_url, headers=HEADERS, timeout=20, allow_redirects=True)
+            if resp2.ok:
+                html = resp2.text
+    except requests.RequestException:
+        html = ""
+
+    meta_parts = _extract_meta_content(html)
+    inline_parts = _extract_inline_json(html)
+    desc_lines = []
+    if meta_parts:
+        desc_lines.append("【页面摘要】\n" + "\n".join(meta_parts))
+    if inline_parts:
+        desc_lines.append("【笔记详情】\n" + "\n".join(inline_parts))
+    description = "\n\n".join(desc_lines).strip() or "（视频内容）"
+
+    transcript = ""
+    try:
+        from extractors.whisper_transcribe import transcribe_xiaohongshu
+        transcript = transcribe_xiaohongshu(video_url)
+        print(f"[xiaohongshu] Whisper 转写完成，长度={len(transcript)}")
+    except Exception as e:
+        print(f"[xiaohongshu] Whisper 转写失败: {e}")
+
+    combined = description
+    if transcript:
+        combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
+
+    return {
+        "transcript": transcript,
+        "description": description,
+        "combined": combined,
+        "platform": "xiaohongshu",
+    }
+
+
 def extract(url: str) -> dict:
     """
     从小红书链接提取文案（页面 meta + 内嵌 JSON）

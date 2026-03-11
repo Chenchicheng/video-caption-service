@@ -10,6 +10,7 @@ router = APIRouter()
 
 class ExtractRequest(BaseModel):
     url: str
+    video_url: str | None = None  # 客户端已提取的视频直链（小红书后端可能拿不到）
 
 
 class ExtractResponse(BaseModel):
@@ -41,6 +42,14 @@ async def extract_caption(req: ExtractRequest):
         raise HTTPException(status_code=400, detail="url 不能为空")
 
     platform = _detect_platform(url)
+
+    if platform == "xiaohongshu" and req.video_url:
+        from extractors.xiaohongshu import extract_with_video_url
+        try:
+            result = extract_with_video_url(url, req.video_url.strip())
+            return ExtractResponse(**result)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     if platform == "youtube":
         from extractors.youtube import extract
