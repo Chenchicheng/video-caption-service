@@ -12,6 +12,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://www.xiaohongshu.com/",
 }
 
 
@@ -74,14 +75,18 @@ def _decode_json_str(s: str) -> str:
 
 def _extract_video_url(html: str) -> str | None:
     """从小红书页面提取视频直链（og:video、originVideoKey、xhscdn、video 等）"""
-    # 1. og:video meta
+    # 1. og:video meta（兼容 name 在前、content 在前等多种写法）
     for pat in [
+        r'<meta\s+name=["\']og:video["\']\s+content=["\']([^"\']+)["\']',
+        r'<meta\s+content=["\']([^"\']+\.mp4[^"\']*)["\']\s+name=["\']og:video["\']',
         r'<meta\s+(?:property|name)=["\']og:video["\']\s+content=["\']([^"\']+)["\']',
         r'<meta\s+content=["\']([^"\']+\.mp4[^"\']*)["\']\s+(?:property|name)=["\']og:video["\']',
     ]:
         m = re.search(pat, html, re.I)
-        if m and "xhscdn" in m.group(1) and ".mp4" in m.group(1):
-            return m.group(1).strip()
+        if m:
+            url = m.group(1).strip()
+            if ("xhscdn" in url or "sns-video" in url) and ".mp4" in url:
+                return url
     # 2. originVideoKey
     m = re.search(r'"originVideoKey"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
     if m:
@@ -161,6 +166,18 @@ def extract(url: str) -> dict:
             if resp2.ok:
                 html = resp2.text
                 final_url = resp2.url
+            # 若仍无视频信息，尝试移动端 UA（部分站点对移动端返回更完整数据）
+            if not _extract_video_url(html):
+                mobile_ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+                resp3 = requests.get(
+                    explore_url,
+                    headers={**HEADERS, "User-Agent": mobile_ua},
+                    timeout=20,
+                    allow_redirects=True,
+                )
+                if resp3.ok and len(resp3.text) > len(html):
+                    html = resp3.text
+                    print(f"[xiaohongshu] 使用移动端 UA 重试，html 长度: {len(html)}")
     except requests.RequestException as e:
         raise RuntimeError(f"请求小红书页面失败: {e}")
 
