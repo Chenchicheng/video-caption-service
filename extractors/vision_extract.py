@@ -22,7 +22,7 @@ VLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 VLM_API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 
 # 并行批次数：16 帧 → 2 批，每批 8 帧并行，总时间约减半
-_NUM_BATCHES = 2
+_NUM_BATCHES = 4
 
 _RECIPE_VISION_PROMPT = """这是烹饪视频的截图（共{n}张，按时间顺序）。请识别画面中所有文字（字幕/贴纸/注释），并提取：
 1. 菜品名称
