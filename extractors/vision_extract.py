@@ -16,7 +16,7 @@ from pathlib import Path
 import requests
 
 SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
-VLM_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
+VLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 VLM_API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 
 _RECIPE_VISION_PROMPT = """这是一个烹饪/菜谱视频的截图序列（共{n}张），请仔细分析每张图片后，提取以下信息：
