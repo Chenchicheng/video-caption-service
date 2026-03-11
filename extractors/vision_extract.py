@@ -42,31 +42,63 @@ _RECIPE_VISION_PROMPT = """这是一个烹饪/菜谱视频的截图序列（共{
 - xxx"""
 
 
+def _probe_duration(
+    video_url: str,
+    referer: str,
+    user_agent: str,
+) -> float:
+    """用 ffprobe 探测视频时长（秒），失败返回 0"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        "-headers", f"Referer: {referer}\r\nUser-Agent: {user_agent}\r\n",
+        video_url,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 def _extract_frames(
     video_url: str,
     out_dir: str,
     *,
     referer: str = "https://www.xiaohongshu.com",
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    num_frames: int = 12,
-    fps: float = 0.5,
+    num_frames: int = 16,
 ) -> list[str]:
-    """ffmpeg 从视频 URL 均匀抽帧，返回图片路径列表"""
+    """
+    ffmpeg 从视频 URL 均匀抽帧，返回图片路径列表。
+    先探测视频时长，再动态计算 fps，保证 num_frames 帧均匀覆盖整段视频。
+    """
     os.makedirs(out_dir, exist_ok=True)
     pattern = os.path.join(out_dir, "frame_%04d.jpg")
+
+    # 探测时长，动态计算 fps 使帧均匀分布在整段视频
+    duration = _probe_duration(video_url, referer, user_agent)
+    if duration > 0:
+        fps = num_frames / duration
+        print(f"[vision] 视频时长 {duration:.1f}s，按 {fps:.3f}fps 抽取 {num_frames} 帧")
+    else:
+        fps = 0.5  # 探测失败时兜底：每 2 秒一帧
+        print(f"[vision] 时长探测失败，使用默认 {fps}fps")
+
     cmd = [
         "ffmpeg", "-y",
         "-referer", referer,
         "-user_agent", user_agent,
         "-i", video_url,
-        "-vf", f"fps={fps}",
+        "-vf", f"fps={fps:.6f}",
         "-frames:v", str(num_frames),
-        "-q:v", "3",          # JPEG 质量，越小越好（1-31）
+        "-q:v", "3",
         "-loglevel", "error",
         pattern,
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=90)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"[vision] ffmpeg 抽帧失败: {e}")
         return []
@@ -149,7 +181,7 @@ def extract_recipe_from_video_frames(
     video_url: str,
     *,
     referer: str = "https://www.xiaohongshu.com",
-    num_frames: int = 12,
+    num_frames: int = 16,
 ) -> str:
     """
     主入口：从视频 URL 抽帧 → VLM 理解 → 返回菜谱文本
