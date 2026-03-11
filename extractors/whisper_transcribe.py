@@ -145,6 +145,9 @@ def transcribe_xiaohongshu(video_url: str) -> str:
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_file = os.path.join(tmpdir, "audio.mp3")
 
+        # ASR 优化：16kHz 单声道 64kbps，语音转写足够，体积小上传快
+        asr_args = ["-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "64k"]
+
         # 方案 1：ffmpeg 直读 URL（不落盘视频，省 I/O）
         try:
             print(f"[asr] 使用 ffmpeg 直读 URL 提取音频: {video_url[:50]}...")
@@ -155,8 +158,8 @@ def transcribe_xiaohongshu(video_url: str) -> str:
                     "-referer", "https://www.xiaohongshu.com",
                     "-user_agent", HEADERS["User-Agent"],
                     "-i", video_url,
-                    "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-                    "-loglevel", "error",  # 减少日志
+                    *asr_args,
+                    "-loglevel", "error",
                     audio_file,
                 ],
                 check=True,
@@ -172,7 +175,7 @@ def transcribe_xiaohongshu(video_url: str) -> str:
                 return ""
             try:
                 subprocess.run(
-                    ["ffmpeg", "-y", "-i", video_file, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_file],
+                    ["ffmpeg", "-y", "-i", video_file, *asr_args, audio_file],
                     check=True,
                     capture_output=True,
                 )
@@ -182,6 +185,9 @@ def transcribe_xiaohongshu(video_url: str) -> str:
 
         if not os.path.exists(audio_file) or os.path.getsize(audio_file) < 100:
             return ""
+
+        size_kb = os.path.getsize(audio_file) / 1024
+        print(f"[asr] 音频准备完成，{size_kb:.0f} KB → 转写中...")
 
         result = transcribe_with_siliconflow(audio_file)
         print(f"[asr] 总用时: {time.time() - t_total:.1f}s")
