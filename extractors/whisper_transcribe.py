@@ -114,7 +114,7 @@ def transcribe_bilibili(bvid: str, cid: int) -> str:
 
 
 def download_video_xiaohongshu(video_url: str, output_path: str) -> bool:
-    """下载小红书视频（xhscdn mp4）"""
+    """下载小红书视频（xhscdn mp4，兜底用）"""
     xhs_headers = {
         **HEADERS,
         "Referer": "https://www.xiaohongshu.com",
@@ -125,7 +125,7 @@ def download_video_xiaohongshu(video_url: str, output_path: str) -> bool:
         resp = requests.get(video_url, headers=xhs_headers, timeout=60, stream=True)
         resp.raise_for_status()
         with open(output_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=65536):  # 64KB 减少 syscall
                 f.write(chunk)
         size_mb = os.path.getsize(output_path) / 1024 / 1024
         print(f"[asr] 视频下载完成，大小: {size_mb:.1f} MB，用时: {time.time() - t0:.1f}s")
@@ -136,25 +136,51 @@ def download_video_xiaohongshu(video_url: str, output_path: str) -> bool:
 
 
 def transcribe_xiaohongshu(video_url: str) -> str:
-    """小红书专用：下载视频 -> ffmpeg 提取音频 -> SiliconFlow 转写"""
+    """
+    小红书专用：FFmpeg 直读 URL 提取音频 -> SiliconFlow 转写
+    优先用 ffmpeg -i URL，省去先下载再提取的步骤；失败时回退到下载+ffmpeg
+    """
     t_total = time.time()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        video_file = os.path.join(tmpdir, "video.mp4")
         audio_file = os.path.join(tmpdir, "audio.mp3")
 
-        if not download_video_xiaohongshu(video_url, video_file):
-            return ""
-
-        # ffmpeg 提取音频为 mp3
+        # 方案 1：ffmpeg 直读 URL（不落盘视频，省 I/O）
         try:
+            print(f"[asr] 使用 ffmpeg 直读 URL 提取音频: {video_url[:50]}...")
             subprocess.run(
-                ["ffmpeg", "-y", "-i", video_file, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_file],
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-referer", "https://www.xiaohongshu.com",
+                    "-user_agent", HEADERS["User-Agent"],
+                    "-i", video_url,
+                    "-vn", "-acodec", "libmp3lame", "-q:a", "2",
+                    "-loglevel", "error",  # 减少日志
+                    audio_file,
+                ],
                 check=True,
                 capture_output=True,
+                timeout=120,
             )
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"[asr] ffmpeg 提取音频失败: {e}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"[asr] ffmpeg 直读失败，回退到下载+提取: {e}")
+
+            # 方案 2：先下载视频再提取
+            video_file = os.path.join(tmpdir, "video.mp4")
+            if not download_video_xiaohongshu(video_url, video_file):
+                return ""
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", video_file, "-vn", "-acodec", "libmp3lame", "-q:a", "2", audio_file],
+                    check=True,
+                    capture_output=True,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError) as e2:
+                print(f"[asr] ffmpeg 提取音频失败: {e2}")
+                return ""
+
+        if not os.path.exists(audio_file) or os.path.getsize(audio_file) < 100:
             return ""
 
         result = transcribe_with_siliconflow(audio_file)
