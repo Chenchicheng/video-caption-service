@@ -67,9 +67,14 @@ def _extract_meta_content(html: str) -> list[str]:
     return parts
 
 
+def _decode_json_str(s: str) -> str:
+    """解码 JSON 中转义的字符串"""
+    return _decode_unicode_escape(s).replace("\\/", "/").replace("\\n", "\n")
+
+
 def _extract_video_url(html: str) -> str | None:
-    """从小红书页面提取视频直链（og:video、originVideoKey、xhscdn）"""
-    # og:video
+    """从小红书页面提取视频直链（og:video、originVideoKey、xhscdn、video 等）"""
+    # 1. og:video meta
     for pat in [
         r'<meta\s+(?:property|name)=["\']og:video["\']\s+content=["\']([^"\']+)["\']',
         r'<meta\s+content=["\']([^"\']+\.mp4[^"\']*)["\']\s+(?:property|name)=["\']og:video["\']',
@@ -77,16 +82,39 @@ def _extract_video_url(html: str) -> str | None:
         m = re.search(pat, html, re.I)
         if m and "xhscdn" in m.group(1) and ".mp4" in m.group(1):
             return m.group(1).strip()
-    # originVideoKey
+    # 2. originVideoKey
     m = re.search(r'"originVideoKey"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
     if m:
-        key = _decode_unicode_escape(m.group(1)).replace("\\/", "/")
+        key = _decode_json_str(m.group(1))
         if len(key) > 5:
             return f"https://sns-video-bd.xhscdn.com/{key}"
-    # xhscdn 直链
-    m = re.search(r'https://sns-video-(?:hw|bd)\.xhscdn\.com/[^\s"\']+\.mp4[^\s"\']*', html)
+    # 3. xhscdn 直链（含转义 \/ 等形式）
+    m = re.search(r'https?:\\?/\\?/sns-video-(?:hw|bd)\.xhscdn\.com[^\s"\']+\.mp4', html)
     if m:
-        return m.group(0).split('"')[0].split("'")[0]
+        return _decode_json_str(m.group(0))
+    m = re.search(r'https://sns-video-(?:hw|bd)\.xhscdn\.com/[^\s"\'<>]+\.mp4[^\s"\'<>]*', html)
+    if m:
+        return m.group(0).rstrip('"\'>&')
+    # 4. masterUrl / video_url / videoUrl
+    m = re.search(r'"masterUrl"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    if m:
+        url = _decode_json_str(m.group(1))
+        if "xhscdn" in url and ".mp4" in url:
+            return url
+    m = re.search(r'"video_url"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    if m:
+        url = _decode_json_str(m.group(1))
+        if "xhscdn" in url:
+            return url
+    m = re.search(r'"videoUrl"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+    if m:
+        url = _decode_json_str(m.group(1))
+        if "xhscdn" in url:
+            return url
+    # 5. 任意 xhscdn mp4（兜底）
+    m = re.search(r'(https://sns-video-[a-z0-9-]+\.xhscdn\.com/[a-zA-Z0-9/_\-\.]+\.mp4[^"\'<>\s]*)', html)
+    if m:
+        return m.group(1).rstrip('"\'>&')
     return None
 
 
@@ -150,6 +178,12 @@ def extract(url: str) -> dict:
 
     # 尝试提取视频直链，走 Whisper 音频转写（与 B 站一致）
     video_url = _extract_video_url(html)
+    if not video_url:
+        # 诊断：页面可能被反爬或为 SPA 需 JS 渲染
+        has_og = "og:video" in html.lower()
+        has_key = "originVideoKey" in html
+        has_xhscdn = "xhscdn" in html and ".mp4" in html
+        print(f"[xiaohongshu] 视频直链未找到，诊断: og:video={has_og} originVideoKey={has_key} xhscdn={has_xhscdn} html_len={len(html)}")
     if video_url:
         print(f"[xiaohongshu] 找到视频直链: {video_url[:60]}...")
         try:
