@@ -16,7 +16,7 @@ from pathlib import Path
 import requests
 
 SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
-VLM_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct"
+VLM_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 VLM_API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 
 _RECIPE_VISION_PROMPT = """这是一个烹饪/菜谱视频的截图序列（共{n}张），请仔细分析每张图片后，提取以下信息：
@@ -68,7 +68,7 @@ def _extract_frames(
     *,
     referer: str = "https://www.xiaohongshu.com",
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    num_frames: int = 16,
+    num_frames: int = 8,
 ) -> list[str]:
     """
     ffmpeg 从视频 URL 均匀抽帧，返回图片路径列表。
@@ -86,14 +86,15 @@ def _extract_frames(
         fps = 0.5  # 探测失败时兜底：每 2 秒一帧
         print(f"[vision] 时长探测失败，使用默认 {fps}fps")
 
+    # scale=640:-1 将宽度限制在 640px（高度等比缩放），大幅减小 base64 payload
     cmd = [
         "ffmpeg", "-y",
         "-referer", referer,
         "-user_agent", user_agent,
         "-i", video_url,
-        "-vf", f"fps={fps:.6f}",
+        "-vf", f"fps={fps:.6f},scale=640:-1",
         "-frames:v", str(num_frames),
-        "-q:v", "3",
+        "-q:v", "5",
         "-loglevel", "error",
         pattern,
     ]
@@ -181,7 +182,7 @@ def extract_recipe_from_video_frames(
     video_url: str,
     *,
     referer: str = "https://www.xiaohongshu.com",
-    num_frames: int = 16,
+    num_frames: int = 8,
 ) -> str:
     """
     主入口：从视频 URL 抽帧 → VLM 理解 → 返回菜谱文本
