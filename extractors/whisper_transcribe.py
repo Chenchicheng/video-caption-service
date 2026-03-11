@@ -205,16 +205,7 @@ def transcribe_xiaohongshu(video_url: str) -> str:
         video_file = os.path.join(tmpdir, "video.mp4")
         ffmpeg_done = False
 
-        # 方案 1：分片并行下载（CDN 支持 Range 时 2-4x 加速）
-        if download_video_xiaohongshu_parallel(video_url, video_file):
-            try:
-                subprocess.run(["ffmpeg", "-y", "-i", video_file, *asr_args, "-loglevel", "error", audio_file],
-                              check=True, capture_output=True)
-                ffmpeg_done = True
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                pass
-
-        # 方案 2：ffmpeg 直读 URL
+        # 方案 1：ffmpeg 直读 URL（边下边转，无落盘，通常最快）
         if not ffmpeg_done:
             try:
                 print(f"[asr] ffmpeg 直读 URL 提取音频: {video_url[:50]}...")
@@ -232,7 +223,16 @@ def transcribe_xiaohongshu(video_url: str) -> str:
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
                 pass
 
-        # 方案 3：单连接下载 + ffmpeg
+        # 方案 2：分片并行下载（ffmpeg 直读失败时，CDN 支持 Range 可加速）
+        if not ffmpeg_done and download_video_xiaohongshu_parallel(video_url, video_file):
+            try:
+                subprocess.run(["ffmpeg", "-y", "-i", video_file, *asr_args, "-loglevel", "error", audio_file],
+                              check=True, capture_output=True)
+                ffmpeg_done = True
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+
+        # 方案 3：单连接下载 + ffmpeg（兜底）
         if not ffmpeg_done:
             if not download_video_xiaohongshu(video_url, video_file):
                 return ""
