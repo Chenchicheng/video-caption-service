@@ -25,6 +25,20 @@ MOBILE_HEADERS = {
 }
 
 
+def _clean_douyin_description(text: str) -> str:
+    """去除抖音分享文案中的噪音：复制打开提示、短链、乱码"""
+    if not text or len(text) < 5:
+        return text
+    # 去除「复制打开抖音极速版，看看【福娃娃美食的作品】」等
+    text = re.sub(r"复制打开抖音[^，]*，看看[^】]*】\s*", "", text)
+    text = re.sub(r"打开抖音[^，\s]*[，\s]*(?:查看|看看)[^\s]*", "", text)
+    # 去除 v.douyin.com 短链
+    text = re.sub(r"\s*https?://v\.douyin\.com/[^\s]+", " ", text)
+    # 去除行首乱码（如 4.15 KWZ:/ l@p.qE 01/23）
+    text = re.sub(r"^\s*\d+\.?\d*\s+[A-Za-z0-9/:@. ]{2,25}\s+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _extract_video_id(url: str) -> str | None:
     """从抖音分享链接提取视频 ID"""
     # 格式: .../video/7583913948572110120/ 或 .../note/xxx
@@ -204,6 +218,8 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
 
     if not description:
         description = "（视频内容）"
+    else:
+        description = _clean_douyin_description(description)
 
     transcript = _transcribe_douyin(video_url)
     if transcript:
@@ -296,6 +312,8 @@ def extract(url: str) -> dict:
 
     if not description:
         description = "（视频内容）"
+    else:
+        description = _clean_douyin_description(description)
 
     transcript = ""
     if video_url:
