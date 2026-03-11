@@ -179,6 +179,17 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
     except Exception as e:
         print(f"[xiaohongshu] Whisper 转写失败: {e}")
 
+    # 无语音/纯文案视频：OCR 画面文字
+    if len(transcript) < 30:
+        try:
+            from extractors.ocr_video import extract_text_from_video
+            ocr_text = extract_text_from_video(video_url)
+            if ocr_text and len(ocr_text) >= 10:
+                transcript = ocr_text if not transcript else f"{transcript}\n\n{ocr_text}"
+                print(f"[xiaohongshu] OCR 画面文字完成，长度={len(ocr_text)}")
+        except Exception as e:
+            print(f"[xiaohongshu] OCR 失败: {e}")
+
     combined = description
     if transcript:
         combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
@@ -260,6 +271,16 @@ def extract(url: str) -> dict:
             print(f"[xiaohongshu] Whisper 转写完成，长度={len(transcript)}")
         except Exception as e:
             print(f"[xiaohongshu] Whisper 转写失败: {e}")
+        # 无语音/纯文案视频：OCR 画面文字
+        if len(transcript) < 30:
+            try:
+                from extractors.ocr_video import extract_text_from_video
+                ocr_text = extract_text_from_video(video_url)
+                if ocr_text and len(ocr_text) >= 10:
+                    transcript = ocr_text if not transcript else f"{transcript}\n\n{ocr_text}"
+                    print(f"[xiaohongshu] OCR 画面文字完成，长度={len(ocr_text)}")
+            except Exception as e:
+                print(f"[xiaohongshu] OCR 失败: {e}")
     else:
         print("[xiaohongshu] 未找到视频直链，仅使用页面文案")
 
@@ -267,7 +288,7 @@ def extract(url: str) -> dict:
     if transcript:
         combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
 
-    if not description or len(description) < 10:
+    if (not description or len(description) < 10) and len(transcript) < 20:
         raise RuntimeError("未能从小红书页面提取到有效文案，请检查链接是否有效")
 
     return {
