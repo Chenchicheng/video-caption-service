@@ -102,29 +102,76 @@ def extract(url: str) -> dict:
     else:
         print("[bilibili] cid=0，无法获取字幕")
 
-    # 没有字幕时，用 Whisper 语音转文字兜底
+    # 没有字幕时，先尝试 Whisper 语音转写
+    whisper_transcript = ""
     if not transcript and cid:
         print("[bilibili] 开始 Whisper 语音转写...")
         try:
             from extractors.whisper_transcribe import transcribe_bilibili
-            transcript = transcribe_bilibili(bvid, cid)
-            print(f"[bilibili] Whisper 转写完成，长度={len(transcript)}")
+            whisper_transcript = transcribe_bilibili(bvid, cid)
+            print(f"[bilibili] Whisper 转写完成，长度={len(whisper_transcript)}")
         except Exception as e:
             print(f"[bilibili] Whisper 转写失败: {e}")
+
+    # 过滤检查：判断 Whisper 转写是否为菜谱相关（过滤背景音乐歌词）
+    whisper_is_recipe = False
+    if whisper_transcript:
+        try:
+            from extractors.transcript_filter import is_transcript_recipe_relevant
+            whisper_is_recipe = is_transcript_recipe_relevant(whisper_transcript)
+            if not whisper_is_recipe:
+                print(f"[bilibili] Whisper 转写疑似歌词/噪音，已排除: {whisper_transcript[:40]}...")
+        except ImportError:
+            whisper_is_recipe = True
+
+    if whisper_is_recipe:
+        transcript = whisper_transcript
+
+    # Whisper 无效时：尝试 VLM 视频帧理解（不受背景音乐影响）
+    vision_text = ""
+    if not transcript and cid:
+        print("[bilibili] Whisper 无效，尝试 VLM 视频帧分析...")
+        try:
+            # 获取视频直链用于抽帧
+            from extractors.whisper_transcribe import download_audio_bilibili
+            import tempfile, os
+            api = f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}&fnval=16&fnver=0&fourk=0"
+            play_resp = requests.get(api, headers=HEADERS, timeout=15)
+            play_data = play_resp.json().get("data", {})
+            # 取视频流直链
+            video_url_for_vision = None
+            dash = play_data.get("dash", {})
+            if dash and dash.get("video"):
+                video_url_for_vision = dash["video"][0].get("baseUrl") or dash["video"][0].get("base_url")
+            if not video_url_for_vision:
+                durl = play_data.get("durl", [])
+                if durl:
+                    video_url_for_vision = durl[0].get("url")
+
+            if video_url_for_vision:
+                from extractors.vision_extract import extract_recipe_from_video_frames
+                vision_text = extract_recipe_from_video_frames(
+                    video_url_for_vision,
+                    referer="https://www.bilibili.com",
+                )
+                if vision_text:
+                    print(f"[bilibili] VLM 帧分析完成，长度={len(vision_text)}")
+        except Exception as e:
+            print(f"[bilibili] VLM 帧分析失败: {e}")
 
     combined_parts = []
     if description:
         combined_parts.append(f"【视频描述】\n{description}")
-    try:
-        from extractors.transcript_filter import is_transcript_recipe_relevant
-        if transcript and is_transcript_recipe_relevant(transcript):
-            combined_parts.append(f"【字幕/语音文字】\n{transcript}")
-        elif transcript and not is_transcript_recipe_relevant(transcript):
-            print(f"[bilibili] 转写疑似歌词/噪音，已排除: {transcript[:40]}...")
-    except ImportError:
-        if transcript:
-            combined_parts.append(f"【字幕/语音文字】\n{transcript}")
+    if transcript:
+        combined_parts.append(f"【字幕/语音文字】\n{transcript}")
+    if vision_text:
+        combined_parts.append(f"【视频画面分析】\n{vision_text}")
     combined = "\n\n".join(combined_parts) if combined_parts else description
+
+    # 合并所有文本到 transcript 字段（兼容下游）
+    all_text_parts = [t for t in [whisper_transcript, vision_text] if t]
+    if not transcript and all_text_parts:
+        transcript = "\n\n".join(all_text_parts)
 
     return {
         "transcript": transcript,

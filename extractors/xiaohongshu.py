@@ -179,33 +179,42 @@ def extract_with_video_url(url: str, video_url: str) -> dict:
     except Exception as e:
         print(f"[xiaohongshu] Whisper 转写失败: {e}")
 
-    # 无语音/纯文案视频：OCR 画面文字（需联网下载模型，可能较慢）
-    # 若页面 description 已足够丰富（如菜谱笔记正文），则跳过 OCR 避免首次下载卡住
-    if len(transcript) < 30 and len(description) < 80:
+    # 过滤：ASR 结果是否为菜谱相关
+    asr_is_recipe = False
+    if transcript:
         try:
-            from extractors.ocr_video import extract_text_from_video
-            ocr_text = extract_text_from_video(video_url)
-            if ocr_text and len(ocr_text) >= 10:
-                transcript = ocr_text if not transcript else f"{transcript}\n\n{ocr_text}"
-                print(f"[xiaohongshu] OCR 画面文字完成，长度={len(ocr_text)}")
-        except Exception as e:
-            print(f"[xiaohongshu] OCR 失败（可忽略，页面文案已够用）: {e}")
-    elif len(transcript) < 30 and len(description) >= 80:
-        print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 OCR")
+            from extractors.transcript_filter import is_transcript_recipe_relevant
+            asr_is_recipe = is_transcript_recipe_relevant(transcript)
+            if not asr_is_recipe:
+                print(f"[xiaohongshu] Whisper 转写疑似歌词/噪音，已排除: {transcript[:40]}...")
+        except ImportError:
+            asr_is_recipe = True
+    if not asr_is_recipe:
+        transcript = ""
 
-    combined = description
-    try:
-        from extractors.transcript_filter import is_transcript_recipe_relevant
-        if transcript and is_transcript_recipe_relevant(transcript):
-            combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
-        elif transcript and not is_transcript_recipe_relevant(transcript):
-            print(f"[xiaohongshu] 转写疑似歌词/噪音，已排除: {transcript[:40]}...")
-    except ImportError:
-        if transcript:
-            combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
+    # ASR 无效 且 页面文案不足时：VLM 视频帧理解（不受背景音乐影响）
+    vision_text = ""
+    if len(transcript) < 30 and len(description) < 80:
+        print(f"[xiaohongshu] ASR/文案不足，尝试 VLM 视频帧分析...")
+        try:
+            from extractors.vision_extract import extract_recipe_from_video_frames
+            vision_text = extract_recipe_from_video_frames(video_url)
+            if vision_text:
+                print(f"[xiaohongshu] VLM 分析完成，长度={len(vision_text)}")
+        except Exception as e:
+            print(f"[xiaohongshu] VLM 分析失败: {e}")
+    elif len(transcript) < 30 and len(description) >= 80:
+        print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 VLM")
+
+    combined_parts = [f"【视频描述】\n{description}"] if description else []
+    if transcript:
+        combined_parts.append(f"【字幕/语音文字】\n{transcript}")
+    if vision_text:
+        combined_parts.append(f"【视频画面分析】\n{vision_text}")
+    combined = "\n\n".join(combined_parts) if combined_parts else description
 
     return {
-        "transcript": transcript,
+        "transcript": transcript or vision_text,
         "description": description,
         "combined": combined,
         "platform": "xiaohongshu",
@@ -281,32 +290,40 @@ def extract(url: str) -> dict:
             print(f"[xiaohongshu] Whisper 转写完成，长度={len(transcript)}")
         except Exception as e:
             print(f"[xiaohongshu] Whisper 转写失败: {e}")
-        # 无语音/纯文案视频：OCR 画面文字（需联网下载模型，可能较慢）
-        # 若页面 description 已足够丰富，则跳过 OCR 避免首次下载卡住
-        if len(transcript) < 30 and len(description) < 80:
+
+        # 过滤：判断 ASR 转写是否为菜谱相关（过滤背景音乐歌词）
+        asr_is_recipe = False
+        if transcript:
             try:
-                from extractors.ocr_video import extract_text_from_video
-                ocr_text = extract_text_from_video(video_url)
-                if ocr_text and len(ocr_text) >= 10:
-                    transcript = ocr_text if not transcript else f"{transcript}\n\n{ocr_text}"
-                    print(f"[xiaohongshu] OCR 画面文字完成，长度={len(ocr_text)}")
+                from extractors.transcript_filter import is_transcript_recipe_relevant
+                asr_is_recipe = is_transcript_recipe_relevant(transcript)
+                if not asr_is_recipe:
+                    print(f"[xiaohongshu] 转写疑似歌词/噪音，已排除: {transcript[:40]}...")
+            except ImportError:
+                asr_is_recipe = True
+        if not asr_is_recipe:
+            transcript = ""
+
+        # ASR 无效 且 页面文案不足时：VLM 视频帧理解（完全不受背景音乐影响）
+        if len(transcript) < 30 and len(description) < 80:
+            print(f"[xiaohongshu] ASR/文案不足，尝试 VLM 视频帧分析...")
+            try:
+                from extractors.vision_extract import extract_recipe_from_video_frames
+                vision_text = extract_recipe_from_video_frames(video_url)
+                if vision_text:
+                    transcript = vision_text if not transcript else f"{transcript}\n\n{vision_text}"
+                    print(f"[xiaohongshu] VLM 分析完成，长度={len(vision_text)}")
             except Exception as e:
-                print(f"[xiaohongshu] OCR 失败（可忽略，页面文案已够用）: {e}")
+                print(f"[xiaohongshu] VLM 分析失败: {e}")
         elif len(transcript) < 30 and len(description) >= 80:
-            print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 OCR")
+            print(f"[xiaohongshu] 页面 description 已足够({len(description)}字)，跳过 VLM")
     else:
         print("[xiaohongshu] 未找到视频直链，仅使用页面文案")
 
-    combined = description
-    try:
-        from extractors.transcript_filter import is_transcript_recipe_relevant
-        if transcript and is_transcript_recipe_relevant(transcript):
-            combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
-        elif transcript and not is_transcript_recipe_relevant(transcript):
-            print(f"[xiaohongshu] 转写疑似歌词/噪音，已排除: {transcript[:40]}...")
-    except ImportError:
-        if transcript:
-            combined = f"【视频描述】\n{description}\n\n【字幕/语音文字】\n{transcript}"
+    combined_parts = [f"【视频描述】\n{description}"] if description else []
+    if transcript:
+        combined_parts.append(f"【字幕/语音文字】\n{transcript}")
+    combined = "\n\n".join(combined_parts) if combined_parts else description
 
     if (not description or len(description) < 10) and len(transcript) < 20:
         raise RuntimeError("未能从小红书页面提取到有效文案，请检查链接是否有效")
