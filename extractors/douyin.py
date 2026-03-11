@@ -1,11 +1,14 @@
 """
 抖音视频文案提取
-- description: 页面 meta（og:title、og:description）+ API desc
+- description: 页面 meta（og:title、og:description）+ RENDER_DATA/API desc
 - transcript: 视频直链 -> Whisper 音频转写，或 VLM 视频帧分析
 - 支持 iesdouyin.com、douyin.com 分享链接
 """
 
 import re
+import json
+from urllib.parse import unquote
+
 import requests
 
 HEADERS = {
@@ -13,6 +16,12 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Referer": "https://www.iesdouyin.com/",
+}
+
+# 移动端 UA，部分接口/页面需要
+MOBILE_HEADERS = {
+    **HEADERS,
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
 }
 
 
@@ -48,17 +57,21 @@ def _extract_meta_content(html: str) -> list[str]:
 
 
 def _fetch_item_info(video_id: str) -> dict | None:
-    """调用抖音 API 获取视频详情（desc、video play_addr）"""
+    """调用抖音 API 获取视频详情（desc、video play_addr），API 可能被限流返回 HTML"""
     api = f"https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/?item_ids={video_id}"
-    try:
-        resp = requests.get(api, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("item_list") or []
-        if items:
-            return items[0]
-    except Exception as e:
-        print(f"[douyin] API 请求失败: {e}")
+    for h in (HEADERS, MOBILE_HEADERS):
+        try:
+            resp = requests.get(api, headers=h, timeout=15)
+            resp.raise_for_status()
+            text = resp.text.strip()
+            if not text or not text.startswith("{"):
+                continue  # 非 JSON，可能是 HTML 反爬页
+            data = json.loads(text)
+            items = data.get("item_list") or []
+            if items:
+                return items[0]
+        except (json.JSONDecodeError, requests.RequestException) as e:
+            print(f"[douyin] API 请求失败: {e}")
     return None
 
 
@@ -78,9 +91,58 @@ def _extract_video_url_from_api(item: dict) -> str | None:
     return None
 
 
+def _extract_from_render_data(html: str) -> tuple[list[str], str | None]:
+    """从 RENDER_DATA 内嵌 JSON 提取 desc 和视频直链，返回 (desc_parts, video_url)"""
+    desc_parts = []
+    video_url = None
+    m = re.search(
+        r'<script\s+id=["\']RENDER_DATA["\']\s+type=["\']application/json["\']>([^<]+)</script>',
+        html, re.I | re.S
+    )
+    if not m:
+        return desc_parts, video_url
+    try:
+        raw = unquote(m.group(1))
+        data = json.loads(raw)
+        # 递归查找 desc、url_list、play_addr 等
+        def _find(obj, path=""):
+            if isinstance(obj, dict):
+                if "desc" in obj and obj["desc"]:
+                    desc_parts.append(str(obj["desc"]).strip())
+                # url_list, play_addr.url_list
+                for key in ("url_list", "url"):
+                    if key in obj:
+                        val = obj[key]
+                        if isinstance(val, list):
+                            for u in val:
+                                if isinstance(u, str) and ("play" in u or ".mp4" in u):
+                                    return u.replace("/playwm/", "/play/")
+                        elif isinstance(val, str) and ("play" in val or ".mp4" in val):
+                            return val.replace("/playwm/", "/play/")
+                for k, v in obj.items():
+                    r = _find(v, f"{path}.{k}")
+                    if r:
+                        return r
+            elif isinstance(obj, list):
+                for i, v in enumerate(obj):
+                    r = _find(v, f"{path}[{i}]")
+                    if r:
+                        return r
+            return None
+
+        video_url = _find(data)
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        print(f"[douyin] RENDER_DATA 解析失败: {e}")
+    return desc_parts, video_url
+
+
 def _extract_video_url_from_html(html: str) -> str | None:
-    """从页面 HTML 提取视频直链（og:video、内嵌 URL）"""
-    # og:video meta
+    """从页面 HTML 提取视频直链（og:video、RENDER_DATA、内嵌 URL）"""
+    # 1. RENDER_DATA
+    _, video_url = _extract_from_render_data(html)
+    if video_url:
+        return video_url
+    # 2. og:video meta
     for pat in [
         r'<meta\s+(?:property|name)=["\']og:video["\']\s+content=["\']([^"\']+)["\']',
         r'<meta\s+content=["\']([^"\']+\.mp4[^"\']*)["\']\s+(?:property|name)=["\']og:video["\']',
@@ -90,12 +152,16 @@ def _extract_video_url_from_html(html: str) -> str | None:
             url = m.group(1).strip()
             if "douyin" in url or "iesdouyin" in url or ".mp4" in url:
                 return url.replace("/playwm/", "/play/")
-    # 内嵌 play_addr url_list
+    # 3. 内嵌 play_addr url_list（含转义）
     m = re.search(r'"url_list"\s*:\s*\["((?:https?:[^"]+))"', html)
     if m:
         url = m.group(1).replace("\\/", "/").replace("/playwm/", "/play/")
         if ".mp4" in url or "play" in url:
             return url
+    # 4. 抖音 CDN 视频直链（v26/aweme/v3 + .mp4）
+    m = re.search(r'(https?://[^"\'\s]*(?:v26|aweme|v3)[^"\'\s]*\.mp4[^"\'\s]*)', html)
+    if m:
+        return m.group(1).replace("\\/", "/").replace("/playwm/", "/play/").rstrip('"\'>&')
     return None
 
 
@@ -198,20 +264,27 @@ def extract(url: str) -> dict:
 
     description = ""
     video_url = None
+    html = ""
 
-    # 1. 抓取页面获取 meta
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
-        resp.raise_for_status()
-        html = resp.text
-        meta_parts = _extract_meta_content(html)
-        if meta_parts:
-            description = "【页面摘要】\n" + "\n".join(meta_parts)
-        video_url = _extract_video_url_from_html(html)
-    except Exception as e:
-        print(f"[douyin] 页面请求失败: {e}")
+    # 1. 抓取页面获取 meta + RENDER_DATA
+    for h in (HEADERS, MOBILE_HEADERS):
+        try:
+            resp = requests.get(url, headers=h, timeout=20, allow_redirects=True)
+            resp.raise_for_status()
+            html = resp.text
+            meta_parts = _extract_meta_content(html)
+            render_desc, render_video = _extract_from_render_data(html)
+            if meta_parts:
+                description = "【页面摘要】\n" + "\n".join(meta_parts)
+            if render_desc and all(d not in description for d in render_desc):
+                description = (description + "\n\n【视频描述】\n" + "\n".join(render_desc)).strip()
+            video_url = _extract_video_url_from_html(html)
+            if description or video_url:
+                break
+        except Exception as e:
+            print(f"[douyin] 页面请求失败: {e}")
 
-    # 2. API 获取 desc 和视频直链
+    # 2. API 获取 desc 和视频直链（API 常被限流，仅作补充）
     item = _fetch_item_info(video_id)
     if item:
         if item.get("desc"):
@@ -265,7 +338,8 @@ def extract(url: str) -> dict:
         combined_parts.append(f"【字幕/语音文字】\n{transcript}")
     combined = "\n\n".join(combined_parts) if combined_parts else description
 
-    if (not description or len(description) < 10) and len(transcript) < 20:
+    # 有任一有效内容即返回（文案不足时由客户端 AI 兜底）
+    if not description and len(transcript) < 20:
         raise RuntimeError("未能从抖音页面提取到有效文案，请检查链接是否有效")
 
     return {
