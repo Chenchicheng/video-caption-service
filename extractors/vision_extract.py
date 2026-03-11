@@ -2,8 +2,10 @@
 VLM 视频帧理解模块 - 用多模态大模型直接"看图识菜谱"
 解决核心问题：背景音乐导致 ASR 转写歌词而非菜谱步骤
 
-流程：ffmpeg 抽帧 → Base64 编码 → Qwen2.5-VL（SiliconFlow）→ 菜谱文本
+流程：ffmpeg 抽帧 → Base64 编码 → Qwen3-VL（SiliconFlow）→ 菜谱文本
 优势：完全不依赖音频，背景音乐对结果零影响
+
+性能优化：将帧分成多批并行请求，总耗时 ≈ 单批耗时（而非帧数 × 单帧时间）
 """
 
 import os
@@ -11,7 +13,7 @@ import base64
 import subprocess
 import tempfile
 import time
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -19,27 +21,22 @@ SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "")
 VLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 VLM_API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 
-_RECIPE_VISION_PROMPT = """这是一个烹饪/菜谱视频的截图序列（共{n}张），请仔细分析每张图片后，提取以下信息：
+# 并行批次数：16 帧 → 2 批，每批 8 帧并行，总时间约减半
+_NUM_BATCHES = 2
 
-1. 菜品名称（从画面或字幕中读取）
-2. 食材列表（含用量，如：鸡蛋 2个、盐 适量）
-3. 烹饪步骤（按顺序，从画面/字幕/文字中读取）
-4. 调料和用量
+_RECIPE_VISION_PROMPT = """这是烹饪视频的截图（共{n}张，按时间顺序）。请识别画面中所有文字（字幕/贴纸/注释），并提取：
+1. 菜品名称
+2. 食材（含用量）
+3. 烹饪步骤（按顺序）
+4. 调料用量
 
-注意：
-- 请读取视频中出现的所有文字（字幕、贴纸、注释等）
-- 如果看到食材配料表画面，完整抄录
-- 如果步骤有数字序号，按序号排列
-- 如果某张图片模糊或无关，忽略即可
+直接输出结果，格式：
+【菜品名称】
+【食材】- xxx
+【步骤】1. xxx
+【调料】- xxx
 
-请用中文输出，格式：
-【菜品名称】xxx
-【食材】
-- xxx
-【步骤】
-1. xxx
-【调料】
-- xxx"""
+看不到相关内容的帧可忽略。"""
 
 
 def _probe_duration(
@@ -77,16 +74,15 @@ def _extract_frames(
     os.makedirs(out_dir, exist_ok=True)
     pattern = os.path.join(out_dir, "frame_%04d.jpg")
 
-    # 探测时长，动态计算 fps 使帧均匀分布在整段视频
     duration = _probe_duration(video_url, referer, user_agent)
     if duration > 0:
         fps = num_frames / duration
         print(f"[vision] 视频时长 {duration:.1f}s，按 {fps:.3f}fps 抽取 {num_frames} 帧")
     else:
-        fps = 0.5  # 探测失败时兜底：每 2 秒一帧
+        fps = 0.5
         print(f"[vision] 时长探测失败，使用默认 {fps}fps")
 
-    # scale=640:-1 将宽度限制在 640px（高度等比缩放），大幅减小 base64 payload
+    # scale=640:-1 宽度限制 640px，大幅减小 base64 payload
     cmd = [
         "ffmpeg", "-y",
         "-referer", referer,
@@ -112,22 +108,17 @@ def _extract_frames(
 
 
 def _encode_image_base64(path: str) -> str:
-    """将图片文件编码为 base64 字符串"""
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
-def _call_vlm(frames: list[str]) -> str:
-    """
-    将多张图片发送给 Qwen2.5-VL，让模型直接理解视频内容并提取菜谱
-    """
+def _call_vlm_single(frames: list[str], batch_idx: int = 0) -> str:
+    """向 VLM 发送一批帧，返回文本"""
     if not SILICONFLOW_API_KEY:
         raise RuntimeError("未配置 SILICONFLOW_API_KEY 环境变量")
-
     if not frames:
         return ""
 
-    # 构建多图消息：文字 prompt + 多张图片
     image_contents = []
     for path in frames:
         b64 = _encode_image_base64(path)
@@ -135,10 +126,9 @@ def _call_vlm(frames: list[str]) -> str:
             "type": "image_url",
             "image_url": {
                 "url": f"data:image/jpeg;base64,{b64}",
-                "detail": "low",   # low 节省 token，对菜谱文字已足够
+                "detail": "low",
             },
         })
-
     image_contents.append({
         "type": "text",
         "text": _RECIPE_VISION_PROMPT.format(n=len(frames)),
@@ -147,12 +137,12 @@ def _call_vlm(frames: list[str]) -> str:
     payload = {
         "model": VLM_MODEL,
         "messages": [{"role": "user", "content": image_contents}],
-        "max_tokens": 1500,
+        "max_tokens": 1000,
         "temperature": 0.1,
     }
 
     t0 = time.time()
-    print(f"[vision] 发送 {len(frames)} 张图给 {VLM_MODEL}...")
+    print(f"[vision] 批次{batch_idx+1}: 发送 {len(frames)} 张图...")
     resp = requests.post(
         VLM_API_URL,
         headers={
@@ -163,17 +153,48 @@ def _call_vlm(frames: list[str]) -> str:
         timeout=120,
     )
     resp.raise_for_status()
-    result = resp.json()
-    text = result["choices"][0]["message"]["content"].strip()
-    print(f"[vision] VLM 返回 {len(text)} 字，用时 {time.time() - t0:.1f}s")
+    text = resp.json()["choices"][0]["message"]["content"].strip()
+    print(f"[vision] 批次{batch_idx+1}: 返回 {len(text)} 字，用时 {time.time() - t0:.1f}s")
     return text
 
 
+def _call_vlm_parallel(frames: list[str], num_batches: int = _NUM_BATCHES) -> str:
+    """
+    将帧均分成 num_batches 批，并行发送给 VLM，合并返回结果。
+    总耗时 ≈ 单批耗时（而非串行的 num_batches 倍）。
+    """
+    if not frames:
+        return ""
+
+    # 帧数较少时不必并行
+    if len(frames) <= 4 or num_batches <= 1:
+        return _call_vlm_single(frames)
+
+    batch_size = (len(frames) + num_batches - 1) // num_batches
+    batches = [frames[i: i + batch_size] for i in range(0, len(frames), batch_size)]
+    print(f"[vision] 并行发送 {len(batches)} 批（每批 {batch_size} 帧）...")
+
+    results: list[str] = [""] * len(batches)
+    with ThreadPoolExecutor(max_workers=len(batches)) as ex:
+        future_to_idx = {
+            ex.submit(_call_vlm_single, batch, idx): idx
+            for idx, batch in enumerate(batches)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                print(f"[vision] 批次{idx+1} 请求失败: {e}")
+
+    # 合并各批结果（按帧时间顺序）
+    merged = "\n\n".join(r for r in results if r)
+    return merged
+
+
 def _is_useful_result(text: str) -> bool:
-    """判断 VLM 返回内容是否包含有效菜谱信息"""
     if not text or len(text) < 20:
         return False
-    # 有任一结构性标记则认为有效
     markers = ["食材", "步骤", "调料", "菜品", "做法", "配料", "克", "勺", "适量"]
     return any(m in text for m in markers)
 
@@ -185,7 +206,7 @@ def extract_recipe_from_video_frames(
     num_frames: int = 16,
 ) -> str:
     """
-    主入口：从视频 URL 抽帧 → VLM 理解 → 返回菜谱文本
+    主入口：从视频 URL 抽帧 → 并行 VLM 理解 → 返回菜谱文本
     失败时返回空字符串，不抛异常（由调用方决定如何降级）
     """
     t_total = time.time()
@@ -200,7 +221,7 @@ def extract_recipe_from_video_frames(
                 print("[vision] 抽帧失败，跳过 VLM 分析")
                 return ""
 
-            result = _call_vlm(frames)
+            result = _call_vlm_parallel(frames)
 
             if not _is_useful_result(result):
                 print(f"[vision] VLM 返回内容不含菜谱信息，忽略: {result[:60]}...")
