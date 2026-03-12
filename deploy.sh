@@ -5,13 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ ! -f ".env" ]; then
-    if [ -f ".env.example" ]; then
-        cp .env.example .env
-        echo "已从 .env.example 创建 .env，请编辑填入 SILICONFLOW_API_KEY 后重新执行: nano .env"
+    echo "首次部署，请输入 SILICONFLOW_API_KEY（输入时不会显示）："
+    read -r -s -p "API Key: " API_KEY
+    echo
+    if [ -z "$API_KEY" ]; then
+        echo "错误: API Key 不能为空"
         exit 1
     fi
-    echo "错误: 请创建 .env 文件并填入 SILICONFLOW_API_KEY=你的密钥"
-    exit 1
+    echo "SILICONFLOW_API_KEY=$API_KEY" > .env
+    echo "已保存到 .env"
 fi
 
 echo "=== 1. 创建虚拟环境并安装依赖 ==="
