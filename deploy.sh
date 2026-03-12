@@ -5,7 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ ! -f ".env" ]; then
-    echo "错误: 请先在项目目录创建 .env 文件并填入 SILICONFLOW_API_KEY"
+    if [ -f ".env.example" ]; then
+        cp .env.example .env
+        echo "已从 .env.example 创建 .env，请编辑填入 SILICONFLOW_API_KEY 后重新执行: nano .env"
+        exit 1
+    fi
+    echo "错误: 请创建 .env 文件并填入 SILICONFLOW_API_KEY=你的密钥"
     exit 1
 fi
 
